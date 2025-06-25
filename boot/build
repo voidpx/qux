@@ -1,0 +1,58 @@
+#!/bin/bash
+
+set -ex
+
+DEBUG=
+
+if [ "$1" == "debug" ]; then
+	DEBUG="-s -S"
+	shift
+fi
+
+make clean setup
+
+img=$1
+if [ -z "$img" ]; then
+	img=test.img
+fi
+
+#line=$(losetup -l | grep "$img" || true)
+#echo line: $line
+#lo_disk=
+#if [ -z "$line" ]; then
+	#echo "mounting $img"
+	lo_disk=$(sudo losetup --partscan --find --show $img)
+#else
+#	#echo "$img already mounted"
+#	arr=($line)
+#	lo_disk=${arr[0]}
+#fi
+#
+
+if [ -z "$lo_disk" ]; then
+	echo "unable to mount loop device"
+	exit 1
+fi
+
+echo disk image loop device: $lo_disk
+
+mnt=$(mktemp -d)
+
+if [ -z "$mnt" ]; then
+	echo "unable to make temp mnt dir"
+	exit 1
+fi
+
+sudo mount ${lo_disk}p1 "$mnt"
+sudo cp setup "${mnt}/image" 
+sudo cp -r bin "${mnt}/" 
+
+sync
+sudo umount "$mnt" 
+rm -r "$mnt"
+sudo losetup --detach ${lo_disk}
+
+qemu-system-x86_64 $DEBUG -M smm=off -d int -D qemu.log -m 1024M -hda "$img" -device rtl8139,bus=pci.0,addr=4,mac=12:34:56:78:9a:bc
+
+
+

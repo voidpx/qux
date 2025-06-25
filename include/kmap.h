@@ -1,0 +1,12 @@
+#ifndef KMAP_H
+#define KMAP_H
+
+#define KERNEL_LOAD  0x1000000
+#define BOOT_LOAD    0x100000
+#define BOOT_PGD     (KERNEL_LOAD - (6 + 2) * 0x1000) 
+#define KERNEL_ENTRY 0xffff800001000000
+#define KERNEL_BASE  0xffff800000000000
+#define KERNEL_PGD_IDX ((KERNEL_BASE & 0x0000ff8000000000) >> 39)
+
+#endif
+

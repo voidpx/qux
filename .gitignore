@@ -1,0 +1,10 @@
+/Debug/
+*.tmp
+*.log
+*.img
+*.o
+*/zig-cache/*
+*/zig-out/*
+*/setup
+*/bin
+

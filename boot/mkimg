@@ -1,0 +1,70 @@
+#!/bin/bash
+
+set -ex
+
+if [ -z "$1" ]; then
+	echo "provide the image name"
+	exit 1
+fi
+img="$1"
+
+size=$2
+
+if [ -z "$size" ]; then
+	size=1G
+
+fi
+
+dd of=$img if=/dev/zero bs=$size count=1
+
+fdisk $img <<-EOF
+n
+
+
+
+
+w
+EOF
+
+lo=$(sudo losetup -P --find --show "$img")
+
+if [ -z "$lo" ]; then
+	echo "unable to mount image"
+	exit 1
+fi
+
+sudo mkfs.ext2 ${lo}p1
+
+mnt=$(mktemp -d)
+
+if [ -z "$mnt" ]; then
+	echo "unable to make temp mount dir"
+	exit 1
+fi
+
+# must not use -o loop
+sudo mount ${lo}p1 "$mnt"
+
+# mount the partition at mnt, write boot MBR to the disk image(not the partition)
+sudo grub-install --no-floppy --root-directory="$mnt" --directory=/usr/lib/grub/i386-pc "$img"
+
+grubcfg=$(cat <<EOF
+set timeout=0
+set default=0
+menuentry "Qux OS" {
+    multiboot2 /image
+    set gfxpayload=640x400x32
+}
+
+EOF
+)
+
+printf "$grubcfg" | sudo tee "${mnt}/boot/grub/grub.cfg"
+
+sync
+sudo umount "$mnt"
+rm -r "$mnt"
+
+sudo losetup --detach $lo
+
+

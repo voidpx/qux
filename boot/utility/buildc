@@ -1,0 +1,4 @@
+#!/bin/bash
+
+musl-gcc -static -g -o us us.c
+
