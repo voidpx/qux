@@ -275,7 +275,7 @@ fn consoleFileRead(_:*fs.File, buf:[]u8) anyerror![]u8 {
         l = lock.cli();
     }
     const len = @min(buf.len, input_buf.len());
-    try input_buf.readFirst(buf, buf.len);
+    try input_buf.readFirst(buf, len);
     return buf[0..len];
 }
 

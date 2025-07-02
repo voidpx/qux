@@ -39,6 +39,12 @@ const AT_HWCAP3 = 29;
 const AT_HWCAP4 = 30;
 const AT_EXECFN = 31;
 
+const syscall = @import("syscall.zig");
+
+pub fn init() void {
+    syscall.registerSysCall(syscall.SysCallNo.sys_execve, &sysExecve);
+}
+
 pub export fn sysExecve(file: [*:0]const u8, argv:?[*:null]?[*:0]const u8,
     envp:?[*:null]?[*:0]const u8) callconv(std.builtin.CallingConvention.SysV) i64 {
     if (exec(file, argv, envp)) |_| {
@@ -89,7 +95,7 @@ pub fn exec(file: [*:0]const u8, argv:?[*:null]?[*:0]const u8, envp:?[*:null]?[*
         if (n.p_type == elf.PT_LOAD) {
             _ = mm.mmap(n.p_vaddr, n.p_memsz, task.Mem.MAP_NOFT) catch |err| {
                 console.print("unable to map elf: {}\n", .{err});
-                task.taskExit(1);
+                task.taskExit(cur, 1);
             };
             var load_at:[*]u8 = @ptrFromInt(n.p_vaddr);
             @memcpy(load_at[0..n.p_filesz], buffer[n.p_offset..n.p_offset + n.p_filesz]);

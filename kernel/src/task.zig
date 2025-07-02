@@ -191,6 +191,17 @@ const Signal = enum(u8) {
        io     =      29,   
 };
 
+fn getTask(pid:u32) ?*Task {
+    var n = task_list.first;
+    while (n) |tn| {
+        if (tn.data.id == pid) {
+            return tn.data;
+        }
+        n = tn.next;
+    }
+    return null;
+}
+
 pub fn disablePreempt() void {
     _=preempt_disabled.fetchAdd(1, std.builtin.AtomicOrder.acquire);
 }
@@ -243,6 +254,7 @@ pub const TaskFs = struct {
         std.debug.assert(self.open_files.items.len == self.open_files.capacity);
         const l = self.open_files.items.len;
         try self.open_files.ensureUnusedCapacity(add);
+        self.open_files.items.len += add;
         @memset(self.open_files.items[l..l+add], null);
         self.open_files.expandToCapacity();
     }
@@ -283,6 +295,11 @@ pub const TaskFs = struct {
     }
 };
 
+pub const User = struct {
+    id:u32 = 0,
+    // ... more
+};
+
 pub const Task = struct {
     list:TaskList.Node = undefined, 
     child_link:TaskList.Node = undefined,
@@ -300,6 +317,9 @@ pub const Task = struct {
     sp:u64 = 0,
     sched:SchedInfo = .{},
     fs:*TaskFs = undefined,
+    pid:u32 = 0, // process id for threads
+    user:User = .{},
+    exit_wq:WaitQueue = .{},
     pub fn needResched(t:*@This()) bool {
         return (t.flags & resched_bit) > 0;
     }
@@ -338,6 +358,24 @@ pub const Task = struct {
         mem.allocator.destroy(this);
         
     }
+    pub fn wait(this:*@This()) i32 {
+        const t = getCurrentTask();
+        if (t == this) {
+            console.print("calling wait from the current task!\n", .{});
+            return -1;
+        }
+        const l = lock.cli();
+        defer lock.sti(l);
+        var node = WaitQueue.Node{.data = t};
+        while (this.state != .dead) {
+            this.exit_wq.append(&node);
+            t.state = .blocked;
+            lock.sti(true);
+            schedule();
+            _=lock.cli();
+        }
+        return this.exit_code;
+    }
 };
 
 fn PriorityCompare(_:void, l:*Task, r:*Task) std.math.Order {
@@ -372,7 +410,7 @@ pub fn init() void {
     init_task.fs.installFd(1, console.stdout);
     init_task.fs.installFd(2, console.stderr);
     runq = RunQueue.init(mem.allocator, void{});
-    syscall.registerSysCall(syscall.SysCallNo.sys_exit, &taskExit);
+    syscall.registerSysCall(syscall.SysCallNo.sys_exit, &sysExit);
     syscall.registerSysCall(syscall.SysCallNo.sys_brk, &sysBrk); 
     syscall.registerSysCall(syscall.SysCallNo.sys_mmap, &sysMMap);
     syscall.registerSysCall(syscall.SysCallNo.sys_munmap, &sysMUnMap);
@@ -385,16 +423,77 @@ pub fn init() void {
     syscall.registerSysCall(syscall.SysCallNo.sys_rt_sigaction, &sysRtSigAction);
     syscall.registerSysCall(syscall.SysCallNo.sys_rt_sigprocmask, &sysRtSigProcMask);
     syscall.registerSysCall(syscall.SysCallNo.sys_gettid, &sysGetTid);
+    syscall.registerSysCall(syscall.SysCallNo.sys_getpid, &sysGetPid);
+    syscall.registerSysCall(syscall.SysCallNo.sys_getpgid, &sysGetPGid);
+    syscall.registerSysCall(syscall.SysCallNo.sys_setpgid, &sysSetPGid);
     syscall.registerSysCall(syscall.SysCallNo.sys_tkill, &sysTKill);
+    syscall.registerSysCall(syscall.SysCallNo.sys_kill, &sysKill);
     syscall.registerSysCall(syscall.SysCallNo.sys_exit_group, &sysExitGroup);
     syscall.registerSysCall(syscall.SysCallNo.sys_clone, &sysClone);
     syscall.registerSysCall(syscall.SysCallNo.sys_fork, &sysFork);
+    syscall.registerSysCall(syscall.SysCallNo.sys_vfork, &sysVFork);
+    syscall.registerSysCall(syscall.SysCallNo.sys_getuid, &sysGetUid);
+    syscall.registerSysCall(syscall.SysCallNo.sys_geteuid, &sysGetEuid);
+    syscall.registerSysCall(syscall.SysCallNo.sys_getppid, &sysGetPPid);
+    syscall.registerSysCall(syscall.SysCallNo.sys_getcwd, &sysGetCwd);
+    syscall.registerSysCall(syscall.SysCallNo.sys_wait4, &sysWait4);
 
     //XXX: special handling for std in/out/err
 }
 
+pub export fn sysWait4(pid:i32, status:*i32, option:i32, ru:?*anyopaque) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const l = lock.cli();
+    defer lock.sti(l);
+    var t:?*Task = null;
+    if (pid == -1) {
+        const p = getCurrentTask();
+        if (p.children.len > 0) {
+            t = @ptrCast(p.children.first.?.data);
+        } else {
+            return 0;
+        }
+    } else {
+        if (getTask(@intCast(pid))) |p| {
+            t = p;
+        } else {
+            return -1;
+        }
+    }
+    _=&status;
+    _=&option;
+    _=&ru;
+    return t.?.wait();
+}
+
+pub export fn sysGetCwd(buf:[*]u8, size:usize) callconv(std.builtin.CallingConvention.SysV) i64 {
+    if (getCurrentTask().fs.cwd) |d| {
+        if (d.entry.name.len + 1 > size) {
+            return -1; // ERANGE
+        } else {
+            @memcpy(buf[0..d.entry.name.len], d.entry.name);
+            buf[d.entry.name.len] = 0;
+            return @intCast(d.entry.name.len);
+        }
+    } else {
+        return -1;
+    }
+}
+
+pub export fn sysGetUid() callconv(std.builtin.CallingConvention.SysV) i64 {
+    return getCurrentTask().user.id;
+}
+
+pub export fn sysGetEuid() callconv(std.builtin.CallingConvention.SysV) i64 {
+    return getCurrentTask().user.id;
+}
+
+pub export fn sysVFork() callconv(std.builtin.CallingConvention.SysV) i64 {
+    //console.print("vfork", .{});
+    return sysFork();
+}
+
 pub export fn sysFork() callconv(std.builtin.CallingConvention.SysV) i64 {
-    console.print("fork", .{});
+    //console.print("fork", .{});
     const ca = CloneArgs{
     };
     const pid = clone(&ca) catch return -1;
@@ -417,15 +516,48 @@ pub export fn sysGetTid() callconv(std.builtin.CallingConvention.SysV) i64 {
 
 }
 
+pub export fn sysGetPGid() callconv(std.builtin.CallingConvention.SysV) i64 {
+    return getCurrentTask().pid;
+}
+
+pub export fn sysSetPGid(pid:u32, pgid:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    _=&pid;
+    _=&pgid;
+    return 0;
+}
+
+pub export fn sysGetPPid() callconv(std.builtin.CallingConvention.SysV) i64 {
+    if (getCurrentTask().parent) |p| {
+        return p.pid;
+    } else {
+        return 0;
+    }
+}
+
+pub export fn sysGetPid() callconv(std.builtin.CallingConvention.SysV) i64 {
+    return getCurrentTask().pid;
+}
+
+pub export fn sysKill(pid:i32, sig:i32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    if (getTask(@intCast(pid))) |t| { // TODO: handle signals
+       taskExit(t, 0); 
+    }
+    // TODO: not implemented
+    //taskExit(0);
+    _=&pid;
+    _=&sig;
+    return 0;
+}
+
 pub export fn sysTKill(tid:u32, sig:i32) callconv(std.builtin.CallingConvention.SysV) i64 {
-    taskExit(0);
+    taskExit(getTask(tid).?, 0);
     _=&tid;
     _=&sig;
     return 0;
 }
 
 pub export fn sysExitGroup(status:i32) callconv(std.builtin.CallingConvention.SysV) noreturn {
-    taskExit(@intCast(status));
+    taskExit(getCurrentTask(), @intCast(status));
     unreachable;
 }
 
@@ -539,17 +671,17 @@ pub export fn sysMMap(addr:u64, len:u64, prot:i32, flags:i32, fd:i32, off:u64)
     _=&off;
     const mm = getCurrentTask().mem;
     if (mm.mmap(addr, len, Mem.MAP_NOFT)) |a| {
-        console.print("mmap 0x{x}, len:0x{x}, at:0x{x}\n", .{addr, len, a.start});
+        //console.print("mmap 0x{x}, len:0x{x}, at:0x{x}\n", .{addr, len, a.start});
         return @intCast(a.start);
     } else |_| {
-        console.print("mmap error: 0x{x}, len:0x{x}\n", .{addr, len});
+        //console.print("mmap error: 0x{x}, len:0x{x}\n", .{addr, len});
         return -1;
     }
 }
 pub export fn sysMUnMap(addr:u64, len:u64) callconv(std.builtin.CallingConvention.SysV) i64 {
     const mm = getCurrentTask().mem;
     mm.munmap(addr, len); 
-    console.print("munmap 0x{x}, len:0x{x}\n", .{addr, len});
+    //console.print("munmap 0x{x}, len:0x{x}\n", .{addr, len});
     return 0;
 }
 
@@ -740,15 +872,20 @@ fn pickTask() *Task {
     return picked;
 }
 
-pub export fn taskExit(code: u16) callconv(std.builtin.CallingConvention.SysV) void {
+
+pub export fn sysExit(code: u16) callconv(std.builtin.CallingConvention.SysV) void {
+    taskExit(getCurrentTask(), code);
+}
+
+pub fn taskExit(t:*Task, code: u16) callconv(std.builtin.CallingConvention.SysV) void {
     const v = lock.cli();
-    var t:*Task = getCurrentTask();
     console.print("task exit: {s}\n", .{t.getName()});
     t.exit_code = code;
     t.state = .dead;
     if (t.parent) |p| {
-        p.sendSignal(.chld);
+        p.sendSignal(.chld); //TODO: handle this
     }
+    wake(&t.exit_wq);
     lock.sti(v);
     // must not free the stack, schedule runs on it
     // let its parent reap it
@@ -821,16 +958,12 @@ fn setupTask(a:*const CloneArgs, task:*Task, cur:*Task) !void {
     const fp = task.stack + task_stack_size - @sizeOf(NewTaskFrame);
     var frame:*NewTaskFrame = @ptrFromInt(fp);
     frame.ret_addr = @intFromPtr(&newTaskEntry);
+    task.pid = cur.pid;
     if (a.func) |f| { // kernel thread
         frame.rbx = @intFromPtr(f);
         frame.r12 = if (a.arg) |arg| @intFromPtr(arg) else 0;
         try task.mem.get();
     } else {
-        if (!a.shareVM()) {
-            task.mem = cur.mem.clone() catch unreachable;
-        } else {
-            try task.mem.get();
-        }
         frame.rbx = 0;
         frame.rbp = 0;
         frame.r12 = 0;
@@ -845,6 +978,8 @@ fn setupTask(a:*const CloneArgs, task:*Task, cur:*Task) !void {
         }
     }
     if (!a.shareVM()) { // process
+        task.pid = task.id;
+        task.mem = cur.mem.clone() catch unreachable;
         task.fs = try TaskFs.new();
         task.fs.cwd = cur.fs.cwd; // TODO: copy the Path
         task.fs.installFd(0, cur.fs.open_files.items[0].?.get().?);
@@ -852,6 +987,7 @@ fn setupTask(a:*const CloneArgs, task:*Task, cur:*Task) !void {
         task.fs.installFd(2, cur.fs.open_files.items[2].?.get().?);
 
     } else { // thread
+        try task.mem.get();
         task.fs = cur.fs.get().?;
     }
     if (a.tls != 0) {
@@ -860,6 +996,7 @@ fn setupTask(a:*const CloneArgs, task:*Task, cur:*Task) !void {
     task.list = .{.prev = null, .next = null, .data = task};
     task.sp = fp;
     task.parent = cur;
+    task.child_link.data = task;
     cur.children.append(&task.child_link);
     task_list.append(&task.list);
     task.sched = .{};

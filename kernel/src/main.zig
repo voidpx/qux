@@ -26,6 +26,7 @@ const font = @import("ui/font.zig");
 const fbcon = @import("ui/fbcon.zig");
 const rand = @import("random.zig");
 const ipc = @import("ipc.zig");
+
 export fn startKernel(b: *bi.BootInfo) callconv(std.builtin.CallingConvention.SysV) void {
     cpu.enableSSE() catch unreachable; // don't enable sse in kernel
     //bi.init(b);
@@ -50,6 +51,8 @@ export fn startKernel(b: *bi.BootInfo) callconv(std.builtin.CallingConvention.Sy
 
     ipc.init();
     task.init();
+    exec.init();
+
     pic.sti();
     
 
@@ -109,10 +112,11 @@ fn loop(_: ?*anyopaque) u16 {
 
 const exec = @import("exec.zig");
 fn testExec(_:?*anyopaque) u16 {
-    const args = [_]?[*:0]const u8 {"/bin/doomgeneric", "-iwad", "/bin/freedoom1.wad", null};
-    const envp = [_]?[*:0]const u8 {"testenv1=ok", "testenv2=no", null};
+    //const args = [_]?[*:0]const u8 {"/bin/doomgeneric", "-iwad", "/bin/freedoom1.wad", null};
+    //const envp = [_]?[*:0]const u8 {"testenv1=ok", "testenv2=no", null};
     //_ = exec.sysExecve("/bin/us", @constCast(@ptrCast(&args)), @constCast(@ptrCast(&envp)));
-    _ = exec.sysExecve("/bin/doomgeneric", @constCast(@ptrCast(&args)), @constCast(@ptrCast(&envp)));
+    //_ = exec.sysExecve("/bin/doomgeneric", @constCast(@ptrCast(&args)), @constCast(@ptrCast(&envp)));
+    _ = exec.sysExecve("/bin/dash", null, null);
     return 0;
 }
 

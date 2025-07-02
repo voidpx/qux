@@ -51,6 +51,7 @@ comptime {
 export fn syscall(state: *idt.IntState, no: u64) callconv(std.builtin.CallingConvention.SysV) u64 {
     _ = &state; 
     //console.print("state: {any}\n", .{state});
+    //console.print("syscall: {}\n", .{@as(SysCallNo, @enumFromInt(no))});
     if (syscall_tb[no]) |f| {
         const ret = asm volatile (
             \\

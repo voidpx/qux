@@ -120,6 +120,9 @@ pub fn init() void {
     syscall.registerSysCall(syscall.SysCallNo.sys_mkdir, &sysMkDir);
     syscall.registerSysCall(syscall.SysCallNo.sys_newstat, &sysStat);
     syscall.registerSysCall(syscall.SysCallNo.sys_lseek, &sysLSeek);
+    syscall.registerSysCall(syscall.SysCallNo.sys_fcntl, &sysFCntl);
+    syscall.registerSysCall(syscall.SysCallNo.sys_dup, &sysDup);
+    syscall.registerSysCall(syscall.SysCallNo.sys_dup2, &sysDup2);
 }
 
 const console = @import("console.zig");
@@ -173,9 +176,101 @@ pub export fn sysClose(fd:i64) callconv(std.builtin.CallingConvention.SysV) i64 
     }
     return 0;
 }
+const F_DUPFD  =	0;
+const F_DUPFD_CLOEXEC = 1030;
+
+pub export fn sysDup(fd:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const cur = task.getCurrentTask();
+    if (cur.fs.open_files.items[fd]) |f| {
+        if (cur.fs.getFreeFd()) |f_| {
+            if (f.get()) |ff| {
+               cur.fs.installFd(f_, ff); 
+                return @intCast(f_);
+            }
+        } else |_| {
+            return -1;
+        }
+    }
+    return -1;
+}
+
+pub export fn sysDup2(fd:u32, nfd:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const cur = task.getCurrentTask();
+    if (nfd >= cur.fs.open_files.items.len) {
+        if (cur.fs.ensureUnused(nfd + 1 - cur.fs.open_files.items.len)) {
+
+        } else |_| {
+            return -1;
+        }
+    }
+    if (cur.fs.open_files.items[nfd]) |_| {
+        return -1;
+    }
+    if (cur.fs.open_files.items[fd]) |f| {
+        if (f.get()) |ff| {
+           cur.fs.installFd(nfd, ff); 
+            return nfd;
+        }
+    }
+    return -1;
+}
+const F_GETFD=1;	
+const F_SETFD=2;	
+const F_GETFL=3;	
+const F_SETFL=4;	
+pub export fn sysFCntl(fd:u32, cmd:u32, arg:u64) callconv(std.builtin.CallingConvention.SysV) i64 {
+    switch (cmd) {
+    F_DUPFD, F_DUPFD_CLOEXEC => {
+            const cur = task.getCurrentTask();
+            const mfd:u32 = @intCast(arg);
+            var nfd:i64 = -1;
+            for (@min(mfd, cur.fs.open_files.items.len)..cur.fs.open_files.items.len) |i| {
+                if (cur.fs.open_files.items[i] == null) {
+                    nfd = @intCast(i);
+                }
+            }
+            if (nfd == -1) {
+                nfd = @intCast(cur.fs.open_files.items.len);
+            }
+            return sysDup2(fd, @intCast(nfd));
+        },
+        F_GETFD, F_SETFD, F_GETFL, F_SETFL => {
+            return 0;
+        },
+    else => std.debug.panic("fcntl command not implemented: {}\n", .{arg})
+    }
+}
+
+// TEMP: move this out to console/tty 
+const TIOCGPGRP = 0x540F;
+const TIOCGWINSZ = 0x5413;
+const TIOCSPGRP = 0x5410;
+const WinSize = extern struct {
+    rows:u16 align(1) = 0,
+    cols:u16 align(1) = 0,
+    xpixel:u16 align(1) = 0,
+    ypixel:u16 align(1) = 0
+};
 
 pub export fn sysIoCtl(fd:u32, cmd:u32, arg:u64) callconv(std.builtin.CallingConvention.SysV) i64 {
-    
+    switch (cmd) {
+        TIOCGPGRP => {
+            const p:*u32 = @ptrFromInt(arg);
+            p.* = 1;
+        }, // TODO: fix this
+        TIOCGWINSZ => {
+            const p:*WinSize = @ptrFromInt(arg);
+            p.rows = 25;
+            p.cols = 40;
+            p.xpixel = 16 * p.cols;
+            p.ypixel = 16 * p.rows;
+            return 0;
+        },
+        TIOCSPGRP => {
+            _=&fd;
+        },
+        else => std.debug.panic("ioctl command not implemented: {}\n", .{cmd}),
+    }
     _=&fd;
     _=&cmd;
     _=&arg;
