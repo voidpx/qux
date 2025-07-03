@@ -26,7 +26,7 @@ pub fn kthread(ca:?*anyopaque) u16 {
     const a = create_args.*;
     mem.allocator.destroy(create_args);
     const code = a.func(a.arg);
-    task.taskExit(code);
+    task.taskExit(task.getCurrentTask(), code);
     return code; // never reached
 }
 

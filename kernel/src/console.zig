@@ -27,11 +27,19 @@ const input_buf_cap = 128;
 pub var stdin:*fs.File = undefined;
 pub var stdout:*fs.File = undefined;
 pub var stderr:*fs.File = undefined;
+const Tty = struct {
+    gpid:u32 = 0
+};
+
+var tty = Tty {
+};
+
 // must be called after mem init
 pub fn inputInit() void {
     input_buf = std.RingBuffer.init(mem.allocator, input_buf_cap) catch unreachable;
     const dummy_path = fs.Path{.fs = @constCast(&console_fs), .entry = undefined};
     stdin = fs.File.get_new(dummy_path, console_fs.fops) catch unreachable; 
+    stdin.ctx = @ptrCast(&tty); 
     stdout = stdin;
     stderr = stdin;
 }
@@ -230,21 +238,29 @@ fn toggleCursor(t: *time.Timer) void {
 fn consoleInput(char:u32) void {
     const l = lock.cli();
     defer lock.sti(l);
+    if (char == 3 and tty.gpid != 0) { // ^C
+        const t = task.getTask(tty.gpid) orelse return;
+        t.sendSignal(.int);
+        return;
+    }
     const c = if (char == 0x7f) 0x8 else char;
     if (c == 0x8) {
         if (input_buf.isEmpty()) return;
         var del:[1]u8 = undefined;
         input_buf.readLast(&del, 1) catch unreachable;
-    }
-    if (!input_buf.isFull()) {
-        input_buf.write(@truncate(c)) catch unreachable;
         const ba = [_]u8{@truncate(c)};
         _=writer.write(&ba) catch unreachable;
-        if (c == '\n') {
+    } else {
+        if (!input_buf.isFull()) {
+            input_buf.write(@truncate(c)) catch unreachable;
+            const ba = [_]u8{@truncate(c)};
+            _=writer.write(&ba) catch unreachable;
+            if (c == '\n') {
+                task.wake(&input_wq);
+            }
+        } else {
             task.wake(&input_wq);
         }
-    } else {
-        task.wake(&input_wq);
     }
 }
 
@@ -258,9 +274,47 @@ fn consoleControl(code:u32) void {
 
 const fs = @import("fs.zig");
 fn dummyFreePath(_:*fs.MountedFs, _:fs.Path) void {}
-const console_fops:fs.FileOps = .{.read = &consoleFileRead, .write = &consoleFileWrite};
+const console_fops:fs.FileOps = .{.read = &consoleFileRead,
+    .write = &consoleFileWrite,
+    .ioctl = &consoleIoCtl,    
+};
 const console_fsop:fs.FsOp = .{.stat = undefined, .lookup = undefined, .copy_path = undefined, .free_path = &dummyFreePath};
 const console_fs:fs.MountedFs = .{.ops = &console_fsop, .ctx = null, .root = undefined, .fops = &console_fops};
+
+const WinSize = extern struct {
+    rows:u16 align(1) = 0,
+    cols:u16 align(1) = 0,
+    xpixel:u16 align(1) = 0,
+    ypixel:u16 align(1) = 0
+};
+
+const TIOCGPGRP = 0x540F;
+const TIOCGWINSZ = 0x5413;
+const TIOCSPGRP = 0x5410;
+fn consoleIoCtl(file:*fs.File, cmd:u32, arg:u64) i64 {
+    _=&file;
+    switch (cmd) {
+        TIOCGPGRP => {
+            const p:*u32 = @ptrFromInt(arg);
+            p.* = 1;
+        }, // TODO: fix this
+        TIOCGWINSZ => {
+            const p:*WinSize = @ptrFromInt(arg);
+            p.rows = 25;
+            p.cols = 40;
+            p.xpixel = 16 * p.cols;
+            p.ypixel = 16 * p.rows;
+            return 0;
+        },
+        TIOCSPGRP => {
+            const pidp:*u32 = @ptrFromInt(arg);
+            const ttyp:*Tty = @alignCast(@ptrCast(file.ctx.?));
+            ttyp.gpid = pidp.*;
+        },
+        else => std.debug.panic("ioctl command not implemented: {}\n", .{cmd}),
+    }
+    return 0;
+}
 
 fn consoleFileRead(_:*fs.File, buf:[]u8) anyerror![]u8 {
     var l = lock.cli();

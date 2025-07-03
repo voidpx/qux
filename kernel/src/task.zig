@@ -59,12 +59,14 @@ pub const Mem = struct {
             if (vr.start > last_end and vr.start - last_end >= size) {
                 return last_end;
             }
-            last_end = (vr.end + 15) & ~@as(u64, 15);
+            last_end = (vr.end + mem.page_size) & ~(mem.page_size - 1);
         }
         return if (end - last_end >= size) last_end else 0;
     }
 
     pub fn mmap(m: *@This(), start:u64, size:u64, flags:u64) !*VmRange {
+        const l = lock.cli();
+        defer lock.sti(l);
         var a = start;
         if (a == 0) {
             a = m.available(size);
@@ -95,6 +97,8 @@ pub const Mem = struct {
     }
 
     pub fn findVr(m: *Mem, addr:u64) !*VmRange {
+        const l = lock.cli();
+        defer lock.sti(l);
         const it = m.vm.inorderIterator();
         while (it.next()) |n| {
             const vr:*VmRange = @ptrCast(n);
@@ -106,6 +110,8 @@ pub const Mem = struct {
     }
 
     pub fn munmap(m: *@This(), start:u64, size:u64) void {
+        const l = lock.cli();
+        defer lock.sti(l);
         var v = VmRange{.start = start, .end = start + size};
         var e = m.vm.getEntryFor(&v);
         if (e.node) |n| {
@@ -115,9 +121,10 @@ pub const Mem = struct {
         }
     }
 
-    pub fn get_new() !*Mem {
+    pub fn get_new(pgd:*mem.PageTable) !*Mem {
         const o = try object.new(Mem, null, &dtor); 
         o.* = .{};
+        o.pgd = pgd;
         return o;
     }
 
@@ -145,8 +152,8 @@ pub const Mem = struct {
     }
 
     pub fn clone(this:*Mem) !*Mem {
-        var new = try get_new();
-        new.pgd = try mem.clonePageTable(this.pgd);
+        const pgd = try mem.clonePageTable(this.pgd);
+        var new = try get_new(pgd);
         new.brk = this.brk;
         new.fsbase = this.fsbase;
         new.gsbase = this.gsbase;
@@ -191,7 +198,7 @@ const Signal = enum(u8) {
        io     =      29,   
 };
 
-fn getTask(pid:u32) ?*Task {
+pub fn getTask(pid:u32) ?*Task {
     var n = task_list.first;
     while (n) |tn| {
         if (tn.data.id == pid) {
@@ -244,6 +251,20 @@ pub const TaskFs = struct {
         @memset(f.open_files.items[0..f.open_files.capacity], null);
         return f;
     }
+
+    pub fn clone(this:*@This()) !*TaskFs {
+        const f= try object.new(TaskFs, null, &drop);
+        f.open_files = try FileList.initCapacity(mem.allocator, this.open_files.items.len);
+        f.open_files.expandToCapacity();
+        f.open_files_num = this.open_files_num;
+        @memset(f.open_files.items[0..f.open_files.capacity], null);
+        for (0..this.open_files.items.len) |i| {
+            const of = this.open_files.items[i] orelse continue;
+            f.open_files.items[i] = of.get();
+        }
+        return f;
+    }
+
     pub fn get(this:*TaskFs) ?*TaskFs {
         return object.get(this);
     }
@@ -254,9 +275,8 @@ pub const TaskFs = struct {
         std.debug.assert(self.open_files.items.len == self.open_files.capacity);
         const l = self.open_files.items.len;
         try self.open_files.ensureUnusedCapacity(add);
-        self.open_files.items.len += add;
-        @memset(self.open_files.items[l..l+add], null);
         self.open_files.expandToCapacity();
+        @memset(self.open_files.items[l..], null);
     }
 
     pub fn getFreeFd(self:*TaskFs) !u64 {
@@ -347,6 +367,8 @@ pub const Task = struct {
         }
     }
     pub fn sendSignal(t:*@This(), sig:Signal) void {
+        const l = lock.cli();
+        defer lock.sti(l);
         t.signal |= @as(u64, 1) << (@as(u6, @truncate(@intFromEnum(sig))) - 1);
         wakeTask(t);
     }
@@ -466,16 +488,13 @@ pub export fn sysWait4(pid:i32, status:*i32, option:i32, ru:?*anyopaque) callcon
 }
 
 pub export fn sysGetCwd(buf:[*]u8, size:usize) callconv(std.builtin.CallingConvention.SysV) i64 {
-    if (getCurrentTask().fs.cwd) |d| {
-        if (d.entry.name.len + 1 > size) {
-            return -1; // ERANGE
-        } else {
-            @memcpy(buf[0..d.entry.name.len], d.entry.name);
-            buf[d.entry.name.len] = 0;
-            return @intCast(d.entry.name.len);
-        }
+    const d = getCurrentTask().fs.cwd orelse return -1;
+    if (d.entry.name.len + 1 > size) {
+        return -1; // ERANGE
     } else {
-        return -1;
+        @memcpy(buf[0..d.entry.name.len], d.entry.name);
+        buf[d.entry.name.len] = 0;
+        return @intCast(d.entry.name.len);
     }
 }
 
@@ -562,19 +581,15 @@ pub export fn sysExitGroup(status:i32) callconv(std.builtin.CallingConvention.Sy
 }
 
 pub export fn sysMProtect(addr:*u8, len:usize, prot:i32) callconv(std.builtin.CallingConvention.SysV) i64 {
-    const mm = getCurrentTask().mem;
-    
-    if (mm.mmap(@intFromPtr(addr), len, 0))  |_| {
-        console.print("mprotect: 0x{x}, 0x{x}\n", .{@as(u64, @intFromPtr(addr)), len});
-        return 0;
-    } else |_|  {
-        console.print("mprotect error: 0x{x}, 0x{x}\n", .{@as(u64, @intFromPtr(addr)), len});
-        return 0; // FIXME
-    }
-
     _=&addr;
     _=&len;
     _=&prot;
+    const mm = getCurrentTask().mem;
+    _=mm.mmap(@intFromPtr(addr), len, 0) catch {
+        console.print("mprotect error: 0x{x}, 0x{x}\n", .{@as(u64, @intFromPtr(addr)), len});
+        return 0; // FIXME
+    };
+    //console.print("mprotect: 0x{x}, 0x{x}\n", .{@as(u64, @intFromPtr(addr)), len});
     return 0;
 }
 
@@ -603,7 +618,7 @@ pub export fn sysArchPrctl(op:i32, option:u64) callconv(std.builtin.CallingConve
     switch (op) {
         ARCH_SET_FS=> {
             //asm volatile("movw $0, %fs");
-            console.print("ARCH_SET_FS:0x{x}\n", .{option});
+            //console.print("ARCH_SET_FS:0x{x}\n", .{option});
             getCurrentTask().mem.fsbase = option;
             msr.wrmsr(msr.MSR_FS_BASE, option);
         },
@@ -652,13 +667,10 @@ pub export fn sysRseq(addr:u64, len:u32, flags:i32, sig:u32) callconv(std.builti
 pub export fn sysBrk(addr:u64) callconv(std.builtin.CallingConvention.SysV) i64 {
     const mm = getCurrentTask().mem;
     if (mm.brk < addr) {
-        if (mm.mmap(mm.brk, addr - mm.brk, Mem.MAP_NOFT)) |_| {
-            console.print("sysBrk: 0x{x}, current brk:0x{x}\n", .{addr, mm.brk});
-            mm.brk = addr;
-            return 0;
-        } else |_| {
-            return @intCast(mm.brk);
-        }
+        _=mm.mmap(mm.brk, addr - mm.brk, Mem.MAP_NOFT) catch return @intCast(mm.brk);
+        //console.print("sysBrk: 0x{x}, current brk:0x{x}\n", .{addr, mm.brk});
+        mm.brk = addr;
+        return 0;
     }
     return @intCast(mm.brk);
 }
@@ -670,13 +682,9 @@ pub export fn sysMMap(addr:u64, len:u64, prot:i32, flags:i32, fd:i32, off:u64)
     _=&fd;
     _=&off;
     const mm = getCurrentTask().mem;
-    if (mm.mmap(addr, len, Mem.MAP_NOFT)) |a| {
-        //console.print("mmap 0x{x}, len:0x{x}, at:0x{x}\n", .{addr, len, a.start});
-        return @intCast(a.start);
-    } else |_| {
-        //console.print("mmap error: 0x{x}, len:0x{x}\n", .{addr, len});
-        return -1;
-    }
+    const a = mm.mmap(addr, len, Mem.MAP_NOFT) catch return -1;
+    //console.print("mmap 0x{x}, len:0x{x}, at:0x{x}\n", .{addr, len, a.start});
+    return @intCast(a.start);
 }
 pub export fn sysMUnMap(addr:u64, len:u64) callconv(std.builtin.CallingConvention.SysV) i64 {
     const mm = getCurrentTask().mem;
@@ -817,6 +825,10 @@ export fn finishTaskSwitch(
         }
         getCurrentState().rax = 0;
     }
+    // TODO: handle signal
+    if ((t.signal & @as(u64, 1) << @truncate(@intFromEnum(Signal.int))) > 0) {
+        taskExit(t, 0);
+    }
 }
 
 extern fn __switchTask(cur:*Task, to:*Task, cur_sp:*u64, next_sp:*u64) void;
@@ -878,18 +890,23 @@ pub export fn sysExit(code: u16) callconv(std.builtin.CallingConvention.SysV) vo
 }
 
 pub fn taskExit(t:*Task, code: u16) callconv(std.builtin.CallingConvention.SysV) void {
-    const v = lock.cli();
-    console.print("task exit: {s}\n", .{t.getName()});
-    t.exit_code = code;
-    t.state = .dead;
-    if (t.parent) |p| {
-        p.sendSignal(.chld); //TODO: handle this
+    const cur = getCurrentTask();
+    if (t != cur) {
+        t.sendSignal(.int);
+    } else {
+        const v = lock.cli();
+        console.print("task exit: {s}\n", .{t.getName()});
+        t.exit_code = code;
+        t.state = .dead;
+        if (t.parent) |p| {
+            p.sendSignal(.chld); //TODO: handle this
+        }
+        wake(&t.exit_wq);
+        lock.sti(v);
+        // must not free the stack, schedule runs on it
+        // let its parent reap it
+        schedule(); 
     }
-    wake(&t.exit_wq);
-    lock.sti(v);
-    // must not free the stack, schedule runs on it
-    // let its parent reap it
-    schedule(); 
 }
 
 fn addToRunQueue(t:*Task) void {
@@ -980,7 +997,7 @@ fn setupTask(a:*const CloneArgs, task:*Task, cur:*Task) !void {
     if (!a.shareVM()) { // process
         task.pid = task.id;
         task.mem = cur.mem.clone() catch unreachable;
-        task.fs = try TaskFs.new();
+        task.fs = try cur.fs.clone();
         task.fs.cwd = cur.fs.cwd; // TODO: copy the Path
         task.fs.installFd(0, cur.fs.open_files.items[0].?.get().?);
         task.fs.installFd(1, cur.fs.open_files.items[1].?.get().?);

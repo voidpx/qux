@@ -47,14 +47,54 @@ pub fn init() void {
 
 pub export fn sysExecve(file: [*:0]const u8, argv:?[*:null]?[*:0]const u8,
     envp:?[*:null]?[*:0]const u8) callconv(std.builtin.CallingConvention.SysV) i64 {
-    if (exec(file, argv, envp)) |_| {
-        return 0;
-    } else |_| {
-        return -1;
-    }
+    exec(file, argv, envp) catch return -1;
+    return 0;
 
 }
-pub fn exec(file: [*:0]const u8, argv:?[*:null]?[*:0]const u8, envp:?[*:null]?[*:0]const u8) !void {
+
+fn copyArgsAndEnv(dst:*[mem.page_size]u8, dst_ptr:*[mem.page_size/@sizeOf(u64)]u64,
+    argv:?[*:null]?[*:0]const u8, envp:?[*:null]?[*:0]const u8) 
+        struct {
+            argc:u32, 
+            envpc: u32, 
+            argv:?[*:null]?[*:0]const u8,
+            env:?[*:null]?[*:0]const u8} {
+    var vp:[*]u8 = @ptrCast(dst);
+    var argc:u64 = 0;
+    var temp:[*]u64 = @ptrCast(dst_ptr);
+    const argcp:*u64 = @ptrCast(temp);
+    temp += 1;
+    const argvp:?[*:null]?[*:0]const u8 = @ptrCast(temp);
+    if (argv) |aa| {
+        while (true) : (argc += 1) {
+            const a = aa[argc] orelse break;
+            const alen = std.mem.len(a) + 1; // 0 terminated
+            @memcpy(vp, a[0..alen]); 
+            temp[argc] = @intFromPtr(vp);
+            vp += alen;
+            vp = @ptrFromInt(((@as(u64, @intFromPtr(vp)) + 15) & ~@as(u64, 15)));
+        }
+    }
+    argcp.* = argc;
+    temp[argc] = 0;
+    temp += argc + 1;
+    const ep:?[*:null]?[*:0]const u8 = @ptrCast(temp);
+    var envpc:u64 = 0;
+    if (envp) |aa| {
+        while (true) : (envpc += 1) {
+            const a = aa[envpc] orelse break;
+            const alen = std.mem.len(a) + 1; // 0 terminated
+            @memcpy(vp, a[0..alen]); 
+            temp[envpc] = @intFromPtr(vp);
+            vp += alen;
+        }
+    }
+    temp[envpc] = 0;
+    return .{.argc = @intCast(argc), .envpc = @intCast(envpc), .argv = argvp, .env = ep};
+
+}
+
+pub fn exec(file: [*:0]const u8, args:?[*:null]?[*:0]const u8, env:?[*:null]?[*:0]const u8) !void {
     const l = lock.cli();
     defer lock.sti(l);
     var st:fs.Stat = undefined;
@@ -72,30 +112,38 @@ pub fn exec(file: [*:0]const u8, argv:?[*:null]?[*:0]const u8, envp:?[*:null]?[*
         return io.IOError.ReadError; 
     }
     
-    //const us_start:u64 = @intFromPtr(&us._start_us);
-    //const us_end:u64 = @intFromPtr(&us._end_us);
     const hdr = elf.Header.parse(@alignCast(@ptrCast(buffer.ptr))) catch return error.NotExecutable;
-    //const buf:[*]const u8 = @ptrFromInt(us_start);
-    //const len = us_end - us_start;
     const source = std.io.StreamSource{.const_buffer = std.io.FixedBufferStream([]const u8){.buffer = buffer, .pos = 0}};
     var pit = hdr.program_header_iterator(source);
-    const new_pgd =  mem.newPGD() catch return error.OutOfMemory;
-    const mm = task.Mem.get_new() catch unreachable; 
-    mm.pgd = new_pgd; 
 
-    // the point of no return
+    // copy the args & env as soon it will not be possible to access
+    const argenv:[]u8 = mem.allocator.alloc(u8, 2 * mem.page_size) catch {
+       return error.OutOfMemory; 
+    };
+    defer mem.allocator.free(argenv);
+    const ap = @as([*]u8, @ptrCast(argenv.ptr)) + mem.page_size; 
+
+    const argenv_info = copyArgsAndEnv(@ptrCast(@alignCast(argenv.ptr)), @ptrCast(@alignCast(ap)), args, env);
+
+    // setup new mem for the task
+    const new_pgd =  mem.newPGD() catch return error.OutOfMemory;
+    const mm = task.Mem.get_new(new_pgd) catch {
+        new_pgd.drop(); 
+        return error.OutOfMemory;
+    }; 
+    // now load the mm and destroy the old one
     var cur = task.getCurrentTask();
     var oldmm = cur.mem;
     cur.mem = mm;
     mem.loadCR3(@intFromPtr(mm.pgd));
     oldmm.put();
     var phdr:u64 = undefined;
-    while (pit.next() catch unreachable) |n| {
-        console.print("phdr type: {}, addr: 0x{x}, memsz: 0x{x}\n", .{n.p_type, n.p_vaddr, n.p_memsz}); 
+    while (pit.next() catch return error.CorruptedELF) |n| {
+        //console.print("phdr type: {}, addr: 0x{x}, memsz: 0x{x}\n", .{n.p_type, n.p_vaddr, n.p_memsz}); 
         if (n.p_type == elf.PT_LOAD) {
             _ = mm.mmap(n.p_vaddr, n.p_memsz, task.Mem.MAP_NOFT) catch |err| {
                 console.print("unable to map elf: {}\n", .{err});
-                task.taskExit(cur, 1);
+                task.taskExit(cur, 1); 
             };
             var load_at:[*]u8 = @ptrFromInt(n.p_vaddr);
             @memcpy(load_at[0..n.p_filesz], buffer[n.p_offset..n.p_offset + n.p_filesz]);
@@ -114,61 +162,34 @@ pub fn exec(file: [*:0]const u8, argv:?[*:null]?[*:0]const u8, envp:?[*:null]?[*
     var rsp = mem.user_max;
     rsp -= mem.page_size;
     // arg & env page
-    _ = try mm.mmap(rsp, mem.page_size, task.Mem.MAP_NOFT);
-    const argpage:[*]u8 = @ptrFromInt(rsp);
-    _ = try mm.mmap(rsp - 10 * mem.page_size, 10 * mem.page_size, task.Mem.MAP_NOFT);
+    _ = mm.mmap(rsp, mem.page_size, task.Mem.MAP_NOFT) catch |err| {
+        mm.put();
+        return err;
+    };
+    // initially map a large chunk of user stack
+    const init_stk_map = 20 * mem.page_size;
+    _ = mm.mmap(rsp - init_stk_map, init_stk_map, task.Mem.MAP_NOFT) catch |err| {
+        mm.put();
+        return err;
+    };
+    var sp:[*]u64 = @ptrFromInt(rsp);
+    // pointers to args & env
+    const stack_alloc = argenv_info.argc + argenv_info.envpc + 3 + 2 * 26 + 1; // argc + args + env + 2 null + 26 aux + 1 random
+    sp -= stack_alloc;
+    sp[stack_alloc - 1] = 0xabcdefab; // random
+    const random_addr:u64 = @intFromPtr(&sp[stack_alloc - 1]);
+
+    _ = copyArgsAndEnv(@ptrFromInt(rsp), @ptrCast(sp), argenv_info.argv, argenv_info.env);
+
+    rsp = @intFromPtr(sp);
+    sp += argenv_info.argc + argenv_info.envpc + 3;
     
-    const temp = try mem.allocator.alloc(u64, mem.page_size/@sizeOf(u64)); // TODO: handle the error, do proper cleanup
-    defer mem.allocator.free(temp);
-    var argc:u64 = 0;
-    var vp:[*]u8 = argpage;
-    if (argv) |aa| {
-        while (true) : (argc += 1) {
-            if (aa[argc]) |a| {
-                const alen = std.mem.len(a) + 1; // 0 terminated
-                @memcpy(vp, a[0..alen]); 
-                temp[argc] = @intFromPtr(vp);
-                vp += alen;
-                vp = @ptrFromInt(((@as(u64, @intFromPtr(vp)) + 15) & ~@as(u64, 15)));
-            } else { 
-                break;
-            }
-        }
-    }
-    var envpc:u64 = 0;
-    if (envp) |aa| {
-        while (true) : (envpc += 1) {
-            if (aa[envpc]) |a| {
-                const alen = std.mem.len(a) + 1; // 0 terminated
-                @memcpy(vp, a[0..alen]); 
-                temp[argc + envpc] = @intFromPtr(vp);
-                vp += alen;
-            } else { 
-                break;
-            }
-        }
-    }
-    const stack_alloc = 3 + 2 * 26 + 1; //
-    rsp -= (argc + envpc + stack_alloc) * @sizeOf(u64);
-    var tempp:[*]u64 = @ptrFromInt(rsp);
-    tempp[stack_alloc - 1] = 0xabcdefab; // random
-    const random_addr:u64 = @intFromPtr(&tempp[stack_alloc - 1]);
-    tempp[0] = argc;
-    tempp += 1;
-    @memcpy(@as([*]u64, @ptrCast(tempp)), temp[0..argc]);
-    tempp += argc;
-    tempp[0] = 0;
-    tempp += 1;
-    @memcpy(@as([*]u64, @ptrCast(tempp)), temp[argc..argc+envpc]);
-    tempp += envpc;
-    tempp[0] = 0; // end of env
-    tempp += 1;
     // begin of AUX vec
-    tempp = addAUXEntry(tempp, AT_PHDR, phdr);
-    tempp = addAUXEntry(tempp, AT_PHNUM, hdr.phnum);
-    tempp = addAUXEntry(tempp, AT_PHENT, @sizeOf(elf.Phdr));
-    tempp = addAUXEntry(tempp, AT_RANDOM, random_addr);
-    tempp = addAUXEntry(tempp, AT_NULL, AT_NULL);
+    sp = addAUXEntry(sp, AT_PHDR, phdr);
+    sp = addAUXEntry(sp, AT_PHNUM, hdr.phnum);
+    sp = addAUXEntry(sp, AT_PHENT, @sizeOf(elf.Phdr));
+    sp = addAUXEntry(sp, AT_RANDOM, random_addr);
+    sp = addAUXEntry(sp, AT_NULL, AT_NULL);
 
     var is = task.getCurrentState();
     //task.tss.sp0 = task.getCurrentSP0(); 
@@ -186,7 +207,7 @@ pub fn exec(file: [*:0]const u8, argv:?[*:null]?[*:0]const u8, envp:?[*:null]?[*
     is.rflags = flags.enumBitOr(.{flags.X86Flags.X86_EFLAGS_IF_BIT});
 }
 
-fn addAUXEntry(at:[*]u64, id:u64, v:u64) [*]u64 {
+inline fn addAUXEntry(at:[*]u64, id:u64, v:u64) [*]u64 {
     at[0] = id;
     at[1] = v;
     return at + 2;

@@ -153,13 +153,12 @@ pub fn handleInput(keycode:u32) void {
 
     const char = kmap[c];
     for (inputHandlers) |h| {
-        if (h) |f| {
-	    if ((kc>>8) == 0xe0) {
-		f.control(c & 0xff);
-	    } else {
-		f.input(char & 0xff);
-	    }
-        }
+	const f = h orelse continue;
+	if ((kc>>8) == 0xe0) {
+	    f.control(c & 0xff);
+	} else {
+	    f.input(char & 0xff);
+	}
     }
 }
 

@@ -55,37 +55,12 @@ export fn startKernel(b: *bi.BootInfo) callconv(std.builtin.CallingConvention.Sy
 
     pic.sti();
     
-
-    //loadUSTest();
-
-    kthread.createUserThread("exec", &testExec, null);
-    //kthread.createKThread("init", &initThread, null);
+    kthread.createUserThread("init", &initThread, null);
 
     //kthread.createKThread("loop", &loop, null);
 
     idleLoop();
-    //while (true) {
-    //    //rtc.readRTC().toString(console.writer) catch unreachable;
-    //    //console.print(" looping...\n", .{});
-    //   // std.debug.panic("test panic", .{});
-    //    //time.sleep(.{.sec = 3});
-
-    //    asm volatile("pause");
-    //}
 }
-
-//fn loadUSTest() void {
-//    const start:u64 = @intFromPtr(&us._start_us);
-//    const end:u64 = @intFromPtr(&us._end_us);
-//    const len = end - start;
-//    const bytes = @as([*]u8, @ptrFromInt(start));
-//    console.print("===start user spac===\n", .{});
-//    for (bytes[0..len]) |b| {
-//        console.print("0x{x:0>2} ", .{b});
-//    }
-//    console.print("\n===end user spac===\n", .{});
-//    std.debug.panic("hlt", .{});
-//}
 
 const flags = @import("flags.zig");
 fn idleLoop() noreturn {
@@ -111,12 +86,15 @@ fn loop(_: ?*anyopaque) u16 {
 }
 
 const exec = @import("exec.zig");
-fn testExec(_:?*anyopaque) u16 {
+fn runShell(_:?*anyopaque) u16 {
     //const args = [_]?[*:0]const u8 {"/bin/doomgeneric", "-iwad", "/bin/freedoom1.wad", null};
     //const envp = [_]?[*:0]const u8 {"testenv1=ok", "testenv2=no", null};
     //_ = exec.sysExecve("/bin/us", @constCast(@ptrCast(&args)), @constCast(@ptrCast(&envp)));
     //_ = exec.sysExecve("/bin/doomgeneric", @constCast(@ptrCast(&args)), @constCast(@ptrCast(&envp)));
-    _ = exec.sysExecve("/bin/dash", null, null);
+    const r = exec.sysExecve("/bin/dash", null, null);
+    if (r == -1) {
+        std.debug.panic("unable to start shell\n", .{});
+    }
     return 0;
 }
 
@@ -136,18 +114,19 @@ fn initThread(_:?*anyopaque) u16 {
 
     //testSched();
 
-    kthread.createUserThread("exec", &testExec, null);
+    return runShell(null);
+    //kthread.createUserThread("init", &runShell, null);
 
-    var cur = task.getCurrentTask();
-    while (true) {
-        // do reaping
-        const v = lock.cli();
-        task.reapTasks();
-        cur.state = .blocked;
-        lock.sti(v);
-        task.schedule();
-    }
-    unreachable;
+    //var cur = task.getCurrentTask();
+    //while (true) {
+    //    // do reaping
+    //    const v = lock.cli();
+    //    task.reapTasks();
+    //    cur.state = .blocked;
+    //    lock.sti(v);
+    //    task.schedule();
+    //}
+    //unreachable;
 }
 
 fn printMemStat(_: ?*anyopaque) u16 {

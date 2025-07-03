@@ -52,23 +52,21 @@ export fn syscall(state: *idt.IntState, no: u64) callconv(std.builtin.CallingCon
     _ = &state; 
     //console.print("state: {any}\n", .{state});
     //console.print("syscall: {}\n", .{@as(SysCallNo, @enumFromInt(no))});
-    if (syscall_tb[no]) |f| {
-        const ret = asm volatile (
-            \\
-            \\ call *%r11 
-            \\ 
-            : [ret] "={rax}" (-> u64),
-            : [rdi] "{rdi}" (state.rdi),
-              [rsi] "{rsi}" (state.rsi),
-              [rdx] "{rdx}" (state.rdx),
-              [rcx] "{rcx}" (state.r10),
-              [r8] "{r8}" (state.r8),
-              [r9] "{r9}" (state.r9),
-              [r11] "{r11}" (f),
-        );
-        return ret;
-    }
-    std.debug.panic("syscall not implemented: {}\n", .{no});
+    const f = syscall_tb[no] orelse std.debug.panic("syscall not implemented: {}\n", .{no}); 
+    const ret = asm volatile (
+        \\
+        \\ call *%r11 
+        \\ 
+        : [ret] "={rax}" (-> u64),
+        : [rdi] "{rdi}" (state.rdi),
+          [rsi] "{rsi}" (state.rsi),
+          [rdx] "{rdx}" (state.rdx),
+          [rcx] "{rcx}" (state.r10),
+          [r8] "{r8}" (state.r8),
+          [r9] "{r9}" (state.r9),
+          [r11] "{r11}" (f),
+    );
+    return ret;
 }
 
 // max number of sys calls

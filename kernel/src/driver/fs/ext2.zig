@@ -67,13 +67,11 @@ fn lookup(mfs:*fs.MountedFs, path:[]const u8, flags:u32) anyerror!fs.Path {
     var it = std.mem.split(u8, path, "/");
     while (it.next()) |e| {
         if (e.len == 0) continue;
-        const fe = lookupDEntry(p.entry, e, flags);
-        if (fe) |f| {
-            _ = p.append(f);
-        } else |err| {
+        const f = lookupDEntry(p.entry, e, flags) catch |err| {
             freePath(mfs, p);
             return err;
-        }
+        };
+        _ = p.append(f);
     }
     return p;
 }
@@ -113,13 +111,11 @@ fn copyPath(mfs:*fs.MountedFs, path:fs.Path) anyerror!fs.Path {
     p.entry = try dupDirEntry(path.entry);
     var d:?*fs.DirEntry = path.entry;
     while (d) |e| {
-        const dup = dupDirEntry(e);
-        if (dup) |dp| {
-            _=p.append(dp);
-        } else |err| {
+        const dp = dupDirEntry(e) catch |err| {
             freePath(mfs, p);
             return err;
-        }
+        };
+        _=p.append(dp);
         d = e.next;
     }
     return p;
@@ -435,15 +431,13 @@ fn getDirEnt(inode:*const INode, ent_name:[]const u8) !*fs.DirEntry {
             pos += entry.rec_len;
             if (std.mem.eql(u8, name, ent_name)) {
                 const pd = try DirEntObj.new(entry); 
-                const ret = allocator.create(fs.DirEntry);
-                if (ret) |r| {
-                    r.name = pd.name;
-                    r.priv = pd;
-                    return r;
-                } else |err| {
+                const r = allocator.create(fs.DirEntry) catch |err| {
                     obj.put(pd);
                     return err;
-                }
+                };
+                r.name = pd.name;
+                r.priv = pd;
+                return r;
             }
         }
     }

@@ -133,14 +133,11 @@ pub fn init(b: *bi.BootInfo) void {
     const init_alloc = InitAllocator.getAllocator();
     page_bitmap = std.DynamicBitSetUnmanaged.initEmpty(init_alloc, max_pfn) catch unreachable;
     for (mems) |om| {
-        if (om) |m| {
-            const spfn = std.mem.alignForwardLog2(m.start, page_shift) >> page_shift;
-            const epfn = m.end >> page_shift;
-            for (spfn..epfn) |i| {
-                page_bitmap.set(i);
-            }
-        } else {
-            break;
+        const m = om orelse break;
+        const spfn = std.mem.alignForwardLog2(m.start, page_shift) >> page_shift;
+        const epfn = m.end >> page_shift;
+        for (spfn..epfn) |i| {
+            page_bitmap.set(i);
         }
     }
 
@@ -163,40 +160,6 @@ pub fn init(b: *bi.BootInfo) void {
     console.inputInit();
 
     idt.registerExceptionHandler(0xe, &handlePageFault);
-    // causing page fault
-    //const temp:*u8 = @ptrFromInt(0x10);
-    //const x = temp.*;
-    //_=&x;
-    
-    //const Test = struct {
-    //    x:u32,
-    //    y:u64,
-    //};
-    //const up = kmalloc(@sizeOf(Test), 8) catch unreachable;
-
-    //_=&up;
-
-    //kfree(up[0..@sizeOf(Test)]);
-
-    //var map = std.AutoHashMap(u32, u32).init(Allocator);
-    //defer map.deinit();
-    //for (0..1<<20) |i| {
-    //    map.put(@truncate(i), @truncate(i)) catch  {
-
-    //    };
-    //}
-
-    //const a1 = map.get(1).?;
-    //const a2 = map.get(3).?;
-
-    //_=&a1;
-    //_=&a2;
-   // const pg = allocPage() catch unreachable;
-   // pg.flag = 0xaa;
-   // const ip: *u32 = @ptrFromInt(pg.getVirAddr());
-   // ip.* = 33;
-   // freePage(pg);
-
 
 }
 
@@ -214,13 +177,11 @@ fn handlePageFault(state: *idt.IntState) void {
 
     const t = task.getCurrentTask();
     const mm = t.mem;
-    if (mm.mmap(cr2, page_size, task.Mem.MAP_NOFT)) |v| {
-        console.print("page fault handled, {any}\n", .{v});
-    } else |err| {
+    const v = mm.mmap(cr2, page_size, task.Mem.MAP_NOFT) catch |err| {
         console.print("error handling page fault, {any}\n", .{err});
-    }
-
-    std.debug.panic("unable to handle page fault", .{});
+        std.debug.panic("unable to handle page fault", .{});
+    }; 
+    console.print("page fault handled, {any}\n", .{v});
 }
 
 pub fn mapUserVm(pgd:*PageTable, start:u64, end:u64) !void {
@@ -381,7 +342,15 @@ pub fn newPGD() !*PageTable {
 
 pub var k_pgd: u64 = 0;
 const pt_num = 512;
-pub const PageTable = extern struct { entries: [pt_num]u64 };
+pub const PageTable = extern struct { 
+    entries: [pt_num]u64, 
+    pub fn new() !*PageTable {
+        return newPGD();
+    }
+    pub fn drop(p:*@This()) void {
+        freePages(pfn2Page(phyAddr(@intFromPtr(p)) >> page_shift), 1); 
+    }
+};
 const k_map_pgd_start = pgdIdx(k_base);
 
 fn reserveKernelMem() void {
@@ -611,7 +580,7 @@ const MCache = struct {
         return .{.cls = cls, .count_per_page = @intCast(npp), .bm_off = bmoff};
     }
     pub fn alloc(m: *@This()) MemoryError![*]u8 {
-        if (m.free_list == null) {
+        const fl =  m.free_list orelse blk: {
             const p = try allocPagesUnlocked(1);
             if (m.bm_off == 0) {
                 p.any = @truncate((@as(u65, 1) << @truncate(m.count_per_page)) - 1);
@@ -625,9 +594,9 @@ const MCache = struct {
             }
 
             m.free_list = p;
-        }
-        const p = m.free_list.?;
-        const ret:[*]u8 = @ptrFromInt(allocObject(m, p));
+            break :blk p;
+        };
+        const ret:[*]u8 = @ptrFromInt(allocObject(m, fl));
         return ret;
     }
 

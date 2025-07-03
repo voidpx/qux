@@ -41,22 +41,16 @@ pub fn List(comptime T:type) type {
         }
     
         pub fn pop(self: *Self) ?T {
-            const n = (&self.list).pop();
-            var r: ?T = null;
-            if (n) |o| {
-                r = o.data;
-                self.delNode(o);
-            }
+            const n = (&self.list).pop() orelse return null;
+            const r = n.data;
+            self.delNode(n);
             return r;
         }
 
         pub fn popFirst(self: *Self) ?T {
-            const n = (&self.list).popFirst();
-            var r: ?T = null;
-            if (n) |o| {
-                r = o.data;
-                self.delNode(o);
-            }
+            const n = (&self.list).popFirst() orelse return null;
+            const r = n.data;
+            self.delNode(n);
             return r;
         }
         
