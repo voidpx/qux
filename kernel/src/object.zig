@@ -39,7 +39,10 @@ inline fn getObjType(comptime T:type) type {
 }
 
 pub fn put(obj:anytype) void {
-    const bt = objTypeOf(@TypeOf(obj));
+    const ti = @typeInfo(@TypeOf(obj));
+    std.debug.assert(ti == .pointer);
+    const ot = ti.pointer.child;
+    const bt = getObjType(ot);
     const op = toBaseObj(obj, bt);
     if (op.__obj_base.__put()) {
         if (op.__obj_base.dtor) |d| {
@@ -59,46 +62,12 @@ inline fn toBaseObj(obj:anytype, tp:type) *tp {
     return op;
 }
 
-inline fn objTypeOf(tp:type) type {
-    // construct a type with __obj_base plus the object 
-    // following is mainly to workaround the error: reified struct must not have decls
-    // even though the structs don't have dcls, why???
-    const ti = @typeInfo(tp);
-    comptime std.debug.assert(ti == .Pointer);
-    const cti = @typeInfo(ti.Pointer.child);
-    const objt = struct {
-        __obj_base:Object
-    };
-    const tp_no_decs:std.builtin.Type = .{.Struct = std.builtin.Type.Struct{
-        .decls = &[_]std.builtin.Type.Declaration{},
-        .fields = cti.Struct.fields,
-        .layout = cti.Struct.layout,
-        .is_tuple = cti.Struct.is_tuple,
-        .backing_integer = cti.Struct.backing_integer
-    }};
-    const base_field = @typeInfo(objt).Struct.fields;
-    
-    const new_fields = [_]std.builtin.Type.StructField{base_field[0], 
-        std.builtin.Type.StructField{
-            .name = "object",
-            .type = @Type(tp_no_decs),
-            .alignment = @alignOf(tp),
-            .default_value = null,
-            .is_comptime = false
-        },
-    };
-    const new_type:std.builtin.Type = .{.Struct = std.builtin.Type.Struct {
-        .decls = &[_]std.builtin.Type.Declaration{},
-        .fields = &new_fields,
-        .layout = .auto,
-        .is_tuple = false,
-        .backing_integer = null
-    }};
-    return @Type(new_type);
-}
 
 pub fn get(obj:anytype) ?@TypeOf(obj) {
-    const bt = objTypeOf(@TypeOf(obj));
+    const ti = @typeInfo(@TypeOf(obj));
+    std.debug.assert(ti == .pointer);
+    const ot = ti.pointer.child;
+    const bt = getObjType(ot);
     const op = toBaseObj(obj, bt);
     if (op.__obj_base.__get()) {
         return obj;

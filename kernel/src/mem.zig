@@ -21,24 +21,30 @@ var heap: u64 = undefined;
 var used_pages: u64 = undefined;
 /// only needed during init for the page bitmap
 const InitAllocator = struct {
-    const vt = std.mem.Allocator.VTable{ .alloc = &@This().alloc, .resize = &resize, .free = &@This().free };
+    const vt = std.mem.Allocator.VTable{ .alloc = &@This().alloc, .resize = &@This().resize, .remap = &@This().remap,
+        .free = &@This().free };
     fn getAllocator() std.mem.Allocator {
         return std.mem.Allocator{ .ptr = @ptrCast(&heap), .vtable = &vt };
     }
 
-    fn alloc(_: *anyopaque, len: usize, ptr_align: u8, _: usize) ?[*]u8 {
-        if (ptr_align > 0) {
-            heap = std.mem.alignForwardLog2(heap, ptr_align);
+    fn alloc(_: *anyopaque, len: usize, ptr_align: std.mem.Alignment, _: usize) ?[*]u8 {
+        const aln:u8 = @intFromEnum(ptr_align);
+        if (aln > 0) {
+            heap = std.mem.alignForwardLog2(heap, aln);
         }
         const r = heap;
         heap += len;
         return @ptrFromInt(r);
     }
-    fn resize(_: *anyopaque, _: []u8, _: u8, _: usize, _: usize) bool {
+    fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
         return false;
     }
 
-    fn free(_: *anyopaque, _: []u8, _: u8, _: usize) void {
+    fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
+        return null;
+    }
+
+    fn free(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize) void {
         // init mem not freed!
     }
 };
@@ -46,17 +52,18 @@ const InitAllocator = struct {
 pub const allocator = _Allocator.getAllocator();
 /// the main allocator for zig std lib
 const _Allocator = struct {
-    const vt = std.mem.Allocator.VTable{ .alloc = &@This().alloc, .resize = &@This().resize, .free = &@This().free };
+    const vt = std.mem.Allocator.VTable{ .alloc = &@This().alloc, .resize = &@This().resize,
+        .remap = &@This().remap, .free = &@This().free };
     fn getAllocator() std.mem.Allocator {
         return std.mem.Allocator{ .ptr = @ptrCast(@constCast(&vt)), .vtable = &vt };
     }
 
-    fn alloc(_: *anyopaque, len: usize, ptr_align: u8, _: usize) ?[*]u8 {
-        const ret:[*]u8 = kmalloc(len, ptr_align) catch return null;  
+    fn alloc(_: *anyopaque, len: usize, ptr_align: std.mem.Alignment, _: usize) ?[*]u8 {
+        const ret:[*]u8 = kmalloc(len, @intFromEnum(ptr_align)) catch return null;  
         //console.print("allocated: 0x{x}, size: 0x{x}\n", .{@as(u64, @intFromPtr(ret)), len});
         return ret;
     }
-    fn resize(ctx: *anyopaque, buf: []u8, buf_align: u8, new_len: usize, ret_addr: usize) bool {
+    fn resize(ctx: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
         _=&ctx;
         _=&buf;
         _=&buf_align;
@@ -65,7 +72,11 @@ const _Allocator = struct {
         return false;
     }
 
-    fn free(_: *anyopaque, buf: []u8, _: u8, _: usize) void {
+    fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
+        return null;
+    }
+
+    fn free(_: *anyopaque, buf: []u8, _: std.mem.Alignment, _: usize) void {
         kfree(buf);
         //console.print("freed: 0x{x}, size 0x{x}\n", .{@as(u64, @intFromPtr(buf.ptr)), buf.len});
     }
@@ -695,17 +706,17 @@ fn virtAddrToPage(addr: u64) *Page {
 }
 
 const mem_sizes = [_]usize{ 8, 16, 24, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 256, 288, 320, 352, 384, 416, 448, 480, 512, 576, 640, 704, 768, 896, 1024, 2048, 4096};
-fn mCompare(_:usize, m1: usize, m2: usize) bool {
-    return std.math.order(m1, m2) == .lt;
+fn mCompare(m1: usize, m2: usize) std.math.Order {
+    return std.math.order(m1, m2);
 }
 
 fn toMemCls(size: usize, sizes: []const usize) usize {
-    return std.sort.upperBound(usize, size-1, sizes, size-1, mCompare);
+    return std.sort.upperBound(usize, sizes, size-1, mCompare);
 }
 pub fn kmalloc(n: usize, a: usize) MemoryError![*]u8 {
     const v = lock.cli(); 
     defer lock.sti(v);
-    const lower = std.sort.lowerBound(usize, a, &mem_sizes, a, mCompare);
+    const lower = std.sort.lowerBound(usize, &mem_sizes, a, mCompare);
     const mci = lower + toMemCls(n, mem_sizes[lower..]);
     if (mci >= mem_caches.len) {
         // FIXME: huge allocation, direct page allocation?

@@ -41,18 +41,18 @@ pub const X86Flags = enum(u8) {
 
 pub fn bit(f: anytype) u64 {
     const tp = @typeInfo(@TypeOf(f));
-    comptime std.debug.assert(tp == .Enum);
+    comptime std.debug.assert(tp == .@"enum");
     return @as(u64, 1) << @truncate(@intFromEnum(f));
 }
 
 pub fn enumBitOr(comptime flags: anytype) u64 {
     const tp = @typeInfo(@TypeOf(flags));
-    comptime std.debug.assert(tp == .Struct);
+    comptime std.debug.assert(tp == .@"struct");
     var ret:u64 = 0;
-    const fields = tp.Struct.fields;
+    const fields = tp.@"struct".fields;
     inline for (0..fields.len) |i| {
         const f = fields[i];
-        std.debug.assert(@typeInfo(f.type) == .Enum);
+        std.debug.assert(@typeInfo(f.type) == .@"enum");
         const flg = @field(flags, f.name); 
         ret |= (1 << @intFromEnum(flg)); 
     }

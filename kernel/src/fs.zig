@@ -232,9 +232,9 @@ pub export fn sysIoCtl(fd:u32, cmd:u32, arg:u64) callconv(std.builtin.CallingCon
     return op(f, cmd, arg);
 }
 
-const IoVec align(1) = extern struct {
-    iov_base:?[*]u8,
-    iov_len:usize
+const IoVec = extern struct {
+    iov_base:?[*]u8 align(1),
+    iov_len:usize align(1)
 };
 
 pub export fn sysReadV(fd:u32, vec:[*]IoVec, vlen:usize) callconv(std.builtin.CallingConvention.SysV) i64 {

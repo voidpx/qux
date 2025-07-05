@@ -3,7 +3,7 @@
 *.log
 *.img
 *.o
-*/zig-cache/*
+*/.zig-cache/*
 */zig-out/*
 */setup
 */bin

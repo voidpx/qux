@@ -64,7 +64,7 @@ fn lookup(mfs:*fs.MountedFs, path:[]const u8, flags:u32) anyerror!fs.Path {
     } else {
         p = try cur.copy();
     }
-    var it = std.mem.split(u8, path, "/");
+    var it = std.mem.splitSequence(u8, path, "/");
     while (it.next()) |e| {
         if (e.len == 0) continue;
         const f = lookupDEntry(p.entry, e, flags) catch |err| {

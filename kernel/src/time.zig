@@ -60,7 +60,7 @@ pub fn addMilliSeconds(msec : i64) void {
 }
 
 fn wakeUp(t:*Timer) void {
-    task.wake(@as(*task.WaitQueue, @alignCast(@ptrCast(t.ctx))));
+    task.wakeup(@as(*task.WaitQueue, @alignCast(@ptrCast(t.ctx))));
 }
 
 const console = @import("console.zig");

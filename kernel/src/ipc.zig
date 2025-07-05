@@ -78,7 +78,7 @@ fn write(file:*fs.File, buf:[]const u8) anyerror!usize {
     const wl = @min(buf.len, len);
     const rl = buf.len - wl;
     try rb.writeSlice(buf[0..wl]);
-    task.wake(&p.r_wq);
+    task.wakeup(&p.r_wq);
     return rl;
 }
 
@@ -99,7 +99,7 @@ fn read(file:*fs.File, buf:[]u8) anyerror![]u8 {
     }
     const len = @min(buf.len, rb.len());
     try rb.readFirst(buf, len);
-    task.wake(&p.w_wq);
+    task.wakeup(&p.w_wq);
     return buf[0..len];
 }
 

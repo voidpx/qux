@@ -238,9 +238,14 @@ fn toggleCursor(t: *time.Timer) void {
 fn consoleInput(char:u32) void {
     const l = lock.cli();
     defer lock.sti(l);
-    if (char == 3 and tty.gpid != 0) { // ^C
-        const t = task.getTask(tty.gpid) orelse return;
-        t.sendSignal(.int);
+    if (char == 3) { // ^C
+        if (tty.gpid != 0) {
+            const t = task.getTask(tty.gpid) orelse return;
+            t.sendSignal(.int);
+            if (t.parent) |p| {
+                tty.gpid = p.pid;
+            }
+        }
         return;
     }
     const c = if (char == 0x7f) 0x8 else char;
@@ -256,10 +261,10 @@ fn consoleInput(char:u32) void {
             const ba = [_]u8{@truncate(c)};
             _=writer.write(&ba) catch unreachable;
             if (c == '\n') {
-                task.wake(&input_wq);
+                task.wakeup(&input_wq);
             }
         } else {
-            task.wake(&input_wq);
+            task.wakeup(&input_wq);
         }
     }
 }

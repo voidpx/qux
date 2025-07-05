@@ -65,6 +65,9 @@ export fn startKernel(b: *bi.BootInfo) callconv(std.builtin.CallingConvention.Sy
 const flags = @import("flags.zig");
 fn idleLoop() noreturn {
     while (true) {
+        //const v = lock.cli();
+        //task.reapTasks();
+        //lock.sti(v);
         task.schedule();
         //if (!flags.isIFOn()) {
         //    console.print("WRONG\n", .{});
@@ -100,6 +103,20 @@ fn runShell(_:?*anyopaque) u16 {
 
 const lock = @import("lock.zig");
 const kthread = @import("kthread.zig");
+fn reaper(_:?*anyopaque) u16 {
+    var cur = task.getCurrentTask();
+    while (true) {
+        // do reaping
+        const v = lock.cli();
+        task.reapTasks();
+        cur.state = .blocked;
+        lock.sti(v);
+        task.schedule();
+    }
+    unreachable;
+
+}
+
 fn initThread(_:?*anyopaque) u16 {
     pci.walkPci();
     //task.startSchedRoutine();
@@ -114,6 +131,7 @@ fn initThread(_:?*anyopaque) u16 {
 
     //testSched();
 
+    //kthread.createKThread("reaper", &reaper, null);
     return runShell(null);
     //kthread.createUserThread("init", &runShell, null);
 

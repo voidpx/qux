@@ -340,6 +340,11 @@ pub const Task = struct {
     pid:u32 = 0, // process id for threads
     user:User = .{},
     exit_wq:WaitQueue = .{},
+    //sig_actions:[64]SigAction = {},
+    pub fn signalOn(t:*@This(), sig: Signal) bool {
+        return (t.signal & @as(u64, 1) << @truncate(@intFromEnum(sig) - 1)) > 0;
+    }
+
     pub fn needResched(t:*@This()) bool {
         return (t.flags & resched_bit) > 0;
     }
@@ -370,7 +375,7 @@ pub const Task = struct {
         const l = lock.cli();
         defer lock.sti(l);
         t.signal |= @as(u64, 1) << (@as(u6, @truncate(@intFromEnum(sig))) - 1);
-        wakeTask(t);
+        wakeupTask(t);
     }
 
     pub fn die(this:*@This()) void {
@@ -444,6 +449,7 @@ pub fn init() void {
     syscall.registerSysCall(syscall.SysCallNo.sys_mprotect, &sysMProtect);
     syscall.registerSysCall(syscall.SysCallNo.sys_rt_sigaction, &sysRtSigAction);
     syscall.registerSysCall(syscall.SysCallNo.sys_rt_sigprocmask, &sysRtSigProcMask);
+    syscall.registerSysCall(syscall.SysCallNo.sys_rt_sigsuspend, &sysRtSigSuspend);
     syscall.registerSysCall(syscall.SysCallNo.sys_gettid, &sysGetTid);
     syscall.registerSysCall(syscall.SysCallNo.sys_getpid, &sysGetPid);
     syscall.registerSysCall(syscall.SysCallNo.sys_getpgid, &sysGetPGid);
@@ -520,8 +526,11 @@ pub export fn sysFork() callconv(std.builtin.CallingConvention.SysV) i64 {
 }
 
 pub export fn sysClone(flags:u64, sp:u64, ptid:?*u32, ctid:?*u32, tls:u64) callconv(std.builtin.CallingConvention.SysV) i64 {
-    console.print("clone, flags:0x{x}, sp:0x{x}, ptdi:0x{x}, ctid:0x{x}, tls:0x{x}\n", .{flags, sp, 
-        if (ptid) |p| @intFromPtr(p) else 0, if (ctid) |p| @intFromPtr(p) else 0, tls});
+    //console.print("clone, flags:0x{x}, sp:0x{x}, ptdi:0x{x}, ctid:0x{x}, tls:0x{x}\n", .{flags, sp, 
+    //    if (ptid) |p| @intFromPtr(p) else 0, if (ctid) |p| @intFromPtr(p) else 0, tls});
+    _=&ptid;
+    _=&ctid;
+    _=&tls;
     const ca = CloneArgs{
         .ustack = sp,
         .flags = flags
@@ -586,7 +595,7 @@ pub export fn sysMProtect(addr:*u8, len:usize, prot:i32) callconv(std.builtin.Ca
     _=&prot;
     const mm = getCurrentTask().mem;
     _=mm.mmap(@intFromPtr(addr), len, 0) catch {
-        console.print("mprotect error: 0x{x}, 0x{x}\n", .{@as(u64, @intFromPtr(addr)), len});
+        //console.print("mprotect error: 0x{x}, 0x{x}\n", .{@as(u64, @intFromPtr(addr)), len});
         return 0; // FIXME
     };
     //console.print("mprotect: 0x{x}, 0x{x}\n", .{@as(u64, @intFromPtr(addr)), len});
@@ -641,8 +650,23 @@ pub export fn sysSetRobustList(addr:u64, len:usize) callconv(std.builtin.Calling
     return 0;
 }
 
-pub export fn sysRtSigAction(sig:i32, act:*anyopaque, oact:*anyopaque, sigsetsize:usize) callconv(std.builtin.CallingConvention.SysV) i64 {
-    _=&sig; // add this to Task
+pub export fn sysRtSigSuspend(sigset:?*anyopaque, sigsetsize:usize) callconv(std.builtin.CallingConvention.SysV) i64 {
+    _=&sigset;
+    _=&sigsetsize;
+    return 0;
+}
+
+const SigAction = struct {
+    handler:?*const fn(u32) void = null,    
+    flags:u64 = 0,
+    restorer:?*const fn() void = null,
+    sigset:u64 = 0
+};
+
+pub export fn sysRtSigAction(sig:i32, act:?*SigAction, oact:?*SigAction, 
+    sigsetsize:usize) callconv(std.builtin.CallingConvention.SysV) i64 {
+    console.print("sigaction: handler:{any}, sig:{}", .{act, sig});
+    _=&sig; 
     _=&act;
     _=&oact;
     _=&sigsetsize;
@@ -736,7 +760,7 @@ pub fn reapTasks() void {
     }
 }
 
-pub const TaskStack align(16) = [task_stack_size]u8; 
+pub const TaskStack = [task_stack_size]u8; 
 inline fn dupTask(cur:*Task) !*Task {
     const t = try mem.allocator.create(Task);
     t.* = cur.*;
@@ -745,7 +769,7 @@ inline fn dupTask(cur:*Task) !*Task {
 
 // XXX: per cpu
 var cur_task:*Task = &init_task;
-pub inline fn getCurrentTask() *Task {
+pub fn getCurrentTask() *Task {
     return cur_task;
 }
 
@@ -826,7 +850,7 @@ export fn finishTaskSwitch(
         getCurrentState().rax = 0;
     }
     // TODO: handle signal
-    if ((t.signal & @as(u64, 1) << @truncate(@intFromEnum(Signal.int))) > 0) {
+    if (t.id != 0 and t.id != 1 and t.signalOn(.int)) {
         taskExit(t, 0);
     }
 }
@@ -877,11 +901,18 @@ fn pickTask() *Task {
         addToRunQueue(cur);
     }
     // XXX: strategy goes here
-    var picked:*Task = if (runq.removeOrNull()) |n| n else cur;
-    if (picked.state != .runnable) {
+    var picked:?*Task = null;
+    while (true) {
+        const n = runq.removeOrNull() orelse break; 
+        if (n.state == .runnable) {
+            picked = n;
+            break;
+        }
+    }
+    if (picked == null) {
         picked = &init_task;
     }
-    return picked;
+    return picked.?;
 }
 
 
@@ -895,13 +926,13 @@ pub fn taskExit(t:*Task, code: u16) callconv(std.builtin.CallingConvention.SysV)
         t.sendSignal(.int);
     } else {
         const v = lock.cli();
-        console.print("task exit: {s}\n", .{t.getName()});
+        console.print("task exit: {}\n", .{t.id});
         t.exit_code = code;
         t.state = .dead;
         if (t.parent) |p| {
             p.sendSignal(.chld); //TODO: handle this
         }
-        wake(&t.exit_wq);
+        wakeup(&t.exit_wq);
         lock.sti(v);
         // must not free the stack, schedule runs on it
         // let its parent reap it
@@ -914,19 +945,25 @@ fn addToRunQueue(t:*Task) void {
     runq.add(t) catch unreachable; // XXX: handle this
 }
 
-pub fn wakeTask(t:*Task) void {
+pub fn wakeupTask(t:*Task) void {
     const v = lock.cli();
     defer lock.sti(v);
-    addToRunQueue(t);
+    wakeupTaskUnlocked(t);
 }
 
-pub fn wake(wq:*WaitQueue) void {
+fn wakeupTaskUnlocked(t:*Task) void {
+    if (t.state != .dead and t.state != .runnable) {
+        t.sched.share = if (runq.peek()) |s| s.sched.share  else 0;
+        addToRunQueue(t);
+    }
+}
+
+pub fn wakeup(wq:*WaitQueue) void {
     const v = lock.cli();
     defer lock.sti(v);
     while (wq.popFirst()) |n| {
         const t = n.data;
-        t.sched.share = if (runq.peek()) |s| s.sched.share  else 0;
-        addToRunQueue(t);
+        wakeupTaskUnlocked(t);
     }
 }
 
