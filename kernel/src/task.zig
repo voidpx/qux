@@ -1,6 +1,7 @@
 const std = @import("std");
 const pic = @import("pic.zig");
 const idt = @import("idt.zig");
+const sig = @import("signal.zig");
 
 const TaskList = std.DoublyLinkedList(*Task);
 pub const WaitQueue = std.DoublyLinkedList(*Task);
@@ -166,38 +167,6 @@ pub const Mem = struct {
     }
 };
 
-const Signal = enum(u8) {
-       hup   =       1,
-       int    =       2,   
-       quit   =       3,   
-       ill    =       4,   
-       trap   =       5,   
-       abrt   =       6,   
-       bus    =       7,   
-       fpe    =       8,   
-       kill   =       9,   
-       usr1   =      10,   
-       segv   =      11,   
-       usr2   =      12,   
-       pipe   =      13,   
-       alrm   =      14,   
-       term   =      15,   
-       stkflt =      16,   
-       chld   =      17,   
-       cont   =      18,   
-       stop   =      19,   
-       tstp   =      20,   
-       ttin   =      21,   
-       ttou   =      22,   
-       urg    =      23,   
-       xcpu   =      24,   
-       xfsz   =      25,   
-       vtalrm =      26,   
-       prof   =      27,   
-       winch  =      28,   
-       io     =      29,   
-};
-
 pub fn getTask(pid:u32) ?*Task {
     var n = task_list.first;
     while (n) |tn| {
@@ -340,9 +309,16 @@ pub const Task = struct {
     pid:u32 = 0, // process id for threads
     user:User = .{},
     exit_wq:WaitQueue = .{},
-    //sig_actions:[64]SigAction = {},
-    pub fn signalOn(t:*@This(), sig: Signal) bool {
-        return (t.signal & @as(u64, 1) << @truncate(@intFromEnum(sig) - 1)) > 0;
+    sig_actions:[64]sig.SigAction = .{sig.SigAction{}}**64,
+    threads:TaskList = .{},
+    thread_link:TaskList.Node = undefined,
+
+    pub fn signalOn(t:*@This(), s: sig.Signal) bool {
+        return (t.signal & (@as(u64, 1) << @truncate(@intFromEnum(s) - 1))) > 0;
+    }
+
+    pub fn clearSignal(t:*@This(), s: sig.Signal) void {
+        t.signal &= ~(@as(u64, 1) << @truncate(@intFromEnum(s) - 1));
     }
 
     pub fn needResched(t:*@This()) bool {
@@ -371,10 +347,10 @@ pub const Task = struct {
             t.sched.cpu_enter = 0;
         }
     }
-    pub fn sendSignal(t:*@This(), sig:Signal) void {
+    pub fn sendSignal(t:*@This(), s:sig.Signal) void {
         const l = lock.cli();
         defer lock.sti(l);
-        t.signal |= @as(u64, 1) << (@as(u6, @truncate(@intFromEnum(sig))) - 1);
+        t.signal |= @as(u64, 1) << (@as(u6, @truncate(@intFromEnum(s))) - 1);
         wakeupTask(t);
     }
 
@@ -401,7 +377,9 @@ pub const Task = struct {
             schedule();
             _=lock.cli();
         }
-        return this.exit_code;
+        const exit_code = this.exit_code;
+        this.die();
+        return exit_code;
     }
 };
 
@@ -444,18 +422,12 @@ pub fn init() void {
     syscall.registerSysCall(syscall.SysCallNo.sys_arch_prctl, &sysArchPrctl);
     syscall.registerSysCall(syscall.SysCallNo.sys_set_tid_address, &sysSetTidAddr);
     syscall.registerSysCall(syscall.SysCallNo.sys_set_robust_list, &sysSetRobustList);
-    syscall.registerSysCall(syscall.SysCallNo.sys_rseq, &sysRseq);
     syscall.registerSysCall(syscall.SysCallNo.sys_prlimit64, &sysPrLimit64);
     syscall.registerSysCall(syscall.SysCallNo.sys_mprotect, &sysMProtect);
-    syscall.registerSysCall(syscall.SysCallNo.sys_rt_sigaction, &sysRtSigAction);
-    syscall.registerSysCall(syscall.SysCallNo.sys_rt_sigprocmask, &sysRtSigProcMask);
-    syscall.registerSysCall(syscall.SysCallNo.sys_rt_sigsuspend, &sysRtSigSuspend);
     syscall.registerSysCall(syscall.SysCallNo.sys_gettid, &sysGetTid);
     syscall.registerSysCall(syscall.SysCallNo.sys_getpid, &sysGetPid);
     syscall.registerSysCall(syscall.SysCallNo.sys_getpgid, &sysGetPGid);
     syscall.registerSysCall(syscall.SysCallNo.sys_setpgid, &sysSetPGid);
-    syscall.registerSysCall(syscall.SysCallNo.sys_tkill, &sysTKill);
-    syscall.registerSysCall(syscall.SysCallNo.sys_kill, &sysKill);
     syscall.registerSysCall(syscall.SysCallNo.sys_exit_group, &sysExitGroup);
     syscall.registerSysCall(syscall.SysCallNo.sys_clone, &sysClone);
     syscall.registerSysCall(syscall.SysCallNo.sys_fork, &sysFork);
@@ -466,6 +438,7 @@ pub fn init() void {
     syscall.registerSysCall(syscall.SysCallNo.sys_getcwd, &sysGetCwd);
     syscall.registerSysCall(syscall.SysCallNo.sys_wait4, &sysWait4);
 
+    sig.init();
     //XXX: special handling for std in/out/err
 }
 
@@ -566,24 +539,6 @@ pub export fn sysGetPid() callconv(std.builtin.CallingConvention.SysV) i64 {
     return getCurrentTask().pid;
 }
 
-pub export fn sysKill(pid:i32, sig:i32) callconv(std.builtin.CallingConvention.SysV) i64 {
-    if (getTask(@intCast(pid))) |t| { // TODO: handle signals
-       taskExit(t, 0); 
-    }
-    // TODO: not implemented
-    //taskExit(0);
-    _=&pid;
-    _=&sig;
-    return 0;
-}
-
-pub export fn sysTKill(tid:u32, sig:i32) callconv(std.builtin.CallingConvention.SysV) i64 {
-    taskExit(getTask(tid).?, 0);
-    _=&tid;
-    _=&sig;
-    return 0;
-}
-
 pub export fn sysExitGroup(status:i32) callconv(std.builtin.CallingConvention.SysV) noreturn {
     taskExit(getCurrentTask(), @intCast(status));
     unreachable;
@@ -650,43 +605,6 @@ pub export fn sysSetRobustList(addr:u64, len:usize) callconv(std.builtin.Calling
     return 0;
 }
 
-pub export fn sysRtSigSuspend(sigset:?*anyopaque, sigsetsize:usize) callconv(std.builtin.CallingConvention.SysV) i64 {
-    _=&sigset;
-    _=&sigsetsize;
-    return 0;
-}
-
-const SigAction = struct {
-    handler:?*const fn(u32) void = null,    
-    flags:u64 = 0,
-    restorer:?*const fn() void = null,
-    sigset:u64 = 0
-};
-
-pub export fn sysRtSigAction(sig:i32, act:?*SigAction, oact:?*SigAction, 
-    sigsetsize:usize) callconv(std.builtin.CallingConvention.SysV) i64 {
-    console.print("sigaction: handler:{any}, sig:{}", .{act, sig});
-    _=&sig; 
-    _=&act;
-    _=&oact;
-    _=&sigsetsize;
-    return 0;
-}
-
-pub export fn sysRtSigProcMask(how:i32, set:*anyopaque, oset:*anyopaque) callconv(std.builtin.CallingConvention.SysV) i64 {
-    _=&how;
-    _=&set;
-    _=&oset;
-
-    return 0;
-}
-pub export fn sysRseq(addr:u64, len:u32, flags:i32, sig:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
-    _=&addr; // add this to Task
-    _=&len;
-    _=&flags;
-    _=&sig;
-    return 0;
-}
 
 pub export fn sysBrk(addr:u64) callconv(std.builtin.CallingConvention.SysV) i64 {
     const mm = getCurrentTask().mem;
@@ -850,8 +768,20 @@ export fn finishTaskSwitch(
         getCurrentState().rax = 0;
     }
     // TODO: handle signal
-    if (t.id != 0 and t.id != 1 and t.signalOn(.int)) {
-        taskExit(t, 0);
+    if (t.id != 0 and t.signal > 0) {
+        handleSignal(t);
+    }
+}
+
+fn handleSignal(t:*Task) void {
+    const fields = @typeInfo(sig.Signal).@"enum".fields;
+    inline for (fields) |f| {
+        const s:sig.Signal = @enumFromInt(f.value);
+        if (t.signalOn(s)) {
+            t.clearSignal(s);
+            sig.handleSignal(f.value);
+            
+        }
     }
 }
 
@@ -920,19 +850,32 @@ pub export fn sysExit(code: u16) callconv(std.builtin.CallingConvention.SysV) vo
     taskExit(getCurrentTask(), code);
 }
 
+fn exitTask(t:*Task, code:u16) void {
+    if (t.state == .dead) return;
+    if (t.id == t.pid) { // the process
+        console.print("process exit: {}\n", .{t.id});
+        while (t.threads.popFirst()) |n| {
+           exitTask(n.data, code); 
+        }
+    } else {
+        console.print("thread exit: {}\n", .{t.id});
+    }
+    t.exit_code = code;
+    t.state = .dead;
+    if (t.parent) |p| {
+        p.children.remove(&t.child_link);
+        p.sendSignal(.chld); //TODO: handle this
+    }
+    wakeup(&t.exit_wq);
+}
+
 pub fn taskExit(t:*Task, code: u16) callconv(std.builtin.CallingConvention.SysV) void {
     const cur = getCurrentTask();
     if (t != cur) {
         t.sendSignal(.int);
     } else {
         const v = lock.cli();
-        console.print("task exit: {}\n", .{t.id});
-        t.exit_code = code;
-        t.state = .dead;
-        if (t.parent) |p| {
-            p.sendSignal(.chld); //TODO: handle this
-        }
-        wakeup(&t.exit_wq);
+        exitTask(t, code);
         lock.sti(v);
         // must not free the stack, schedule runs on it
         // let its parent reap it
@@ -1041,8 +984,12 @@ fn setupTask(a:*const CloneArgs, task:*Task, cur:*Task) !void {
         task.fs.installFd(2, cur.fs.open_files.items[2].?.get().?);
 
     } else { // thread
+        task.pid = cur.pid;
         try task.mem.get();
         task.fs = cur.fs.get().?;
+        const proc = getTask(cur.pid) orelse unreachable;
+        task.thread_link = .{.data = task};
+        proc.threads.append(&task.thread_link);
     }
     if (a.tls != 0) {
         task.mem.fsbase = a.tls;

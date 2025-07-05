@@ -1,4 +1,19 @@
-pub const SigContext = struct {
+pub const SigFrame = extern struct {
+    ret_addr:u64,
+    flags:u64,
+    link:u64,
+    ss_sp:u64,
+    ss_flags:u32,
+    ss_size:u64,
+    context:SigContext,
+    sig_info:extern struct {
+        sig_no:i32,
+        sig_errno:i32,
+        sig_code:i32
+    }
+};
+
+pub const SigContext = extern struct {
     r8: u64,
     r9: u64,
     r10: u64,
@@ -29,3 +44,188 @@ pub const SigContext = struct {
     fpstate: u64,
     reserved1: [8]u64,
 };
+
+pub const Signal = enum(u8) {
+       hup   =       1,
+       int    =       2,   
+       quit   =       3,   
+       ill    =       4,   
+       trap   =       5,   
+       abrt   =       6,   
+       bus    =       7,   
+       fpe    =       8,   
+       kill   =       9,   
+       usr1   =      10,   
+       segv   =      11,   
+       usr2   =      12,   
+       pipe   =      13,   
+       alrm   =      14,   
+       term   =      15,   
+       stkflt =      16,   
+       chld   =      17,   
+       cont   =      18,   
+       stop   =      19,   
+       tstp   =      20,   
+       ttin   =      21,   
+       ttou   =      22,   
+       urg    =      23,   
+       xcpu   =      24,   
+       xfsz   =      25,   
+       vtalrm =      26,   
+       prof   =      27,   
+       winch  =      28,   
+       io     =      29,   
+};
+const std = @import("std");
+const console = @import("console.zig");
+pub export fn sysRtSigSuspend(sigset:?*anyopaque, sigsetsize:usize) callconv(std.builtin.CallingConvention.SysV) i64 {
+    _=&sigset;
+    _=&sigsetsize;
+    return 0;
+}
+
+pub const SigAction = struct {
+    handler:?*const fn(u32) void = null,    
+    flags:u64 = 0,
+    restorer:?*const fn() void = null,
+    sigset:u64 = 0
+};
+
+pub fn handleSignal(s:i32) void {
+    const t = task.getCurrentTask();
+    const act = t.sig_actions[@intCast(s)];
+    const handler = act.handler orelse {
+        task.taskExit(t, 1); 
+        return;
+    };
+    const regs = task.getCurrentState();
+    const fsp = std.mem.alignBackward(u64, regs.rsp - 128 - @sizeOf(SigFrame), 16);
+    const sigframe:*SigFrame = @ptrFromInt(fsp);
+    sigframe.flags = 0;
+    sigframe.link = 0;
+    sigframe.ss_sp = 0;
+    sigframe.ss_size = 0;
+    sigframe.ss_flags = 0;
+    sigframe.context.flags = regs.rflags;
+    sigframe.context.r8 = regs.r8;
+    sigframe.context.r9 = regs.r9;
+    sigframe.context.r10 = regs.r10;
+    sigframe.context.r11 = regs.r11;
+    sigframe.context.r12 = regs.r12;
+    sigframe.context.r13 = regs.r13;
+    sigframe.context.r14 = regs.r14;
+    sigframe.context.r15 = regs.r15;
+    sigframe.context.di = regs.rdi;
+    sigframe.context.si = regs.rsi;
+    sigframe.context.bp = regs.rbp;
+    sigframe.context.bx = regs.rbx;
+    sigframe.context.dx = regs.rdx;
+    sigframe.context.ax = regs.rax;
+    sigframe.context.cx = regs.rcx;
+    sigframe.context.sp = regs.rsp;
+    sigframe.context.ip = regs.rip;
+    sigframe.context.cs = @intCast(regs.cs);
+    sigframe.context.gs = 0;
+    //sigframe.context.fs = @intCast(t.mem.fsbase);
+    sigframe.context.ss = @intCast(regs.ss);
+    sigframe.sig_info.sig_no = s;
+    sigframe.sig_info.sig_errno = 0;
+    sigframe.sig_info.sig_code = 0;
+    if (act.restorer) |r| {
+        sigframe.ret_addr = @intFromPtr(r);
+    }
+    
+    regs.rsp = @intFromPtr(sigframe);
+    regs.rip = @intFromPtr(handler);
+    regs.rdi = @intCast(s);
+    regs.rsi = @intFromPtr(&sigframe.sig_info);
+    regs.rax = 0;
+    regs.rdx = @intFromPtr(&sigframe.context);
+
+}
+
+pub export fn sysRtSigReturn() callconv(std.builtin.CallingConvention.SysV) i64 {
+    //console.print("sigreturn\n", .{});
+    const regs = task.getCurrentState();
+    const sigframe:*SigFrame = @ptrFromInt(regs.rsp - @sizeOf(u64)); // count the ret_addr
+
+    regs.rflags = sigframe.context.flags;
+    regs.r8   =   sigframe.context.r8; 
+    regs.r9   =   sigframe.context.r9; 
+    regs.r10  =  sigframe.context.r10;
+    regs.r11  =  sigframe.context.r11;
+    regs.r12  =  sigframe.context.r12;
+    regs.r13  =  sigframe.context.r13;
+    regs.r14  =  sigframe.context.r14;
+    regs.r15  =  sigframe.context.r15;
+    regs.rdi  =   sigframe.context.di; 
+    regs.rsi  =   sigframe.context.si; 
+    regs.rbp  =   sigframe.context.bp; 
+    regs.rbx  =   sigframe.context.bx; 
+    regs.rdx  =   sigframe.context.dx; 
+    regs.rax  =   sigframe.context.ax; 
+    regs.rcx  =   sigframe.context.cx; 
+    regs.rsp  =   sigframe.context.sp; 
+    regs.rip  =   sigframe.context.ip; 
+
+    return 0;
+}
+
+pub export fn sysRtSigAction(s:i32, act:?*SigAction, oact:?*SigAction, 
+    sigsetsize:usize) callconv(std.builtin.CallingConvention.SysV) i64 {
+    if (s < 0 or s >= 64) return -1;
+    const action = act orelse return -1;
+    const t = task.getCurrentTask();
+    t.sig_actions[@intCast(s)] = action.*;
+
+    //console.print("sigaction: handler:{any}, sig:{}", .{act, s});
+    _=&s; 
+    _=&act;
+    _=&oact;
+    _=&sigsetsize;
+    return 0;
+}
+
+pub export fn sysRtSigProcMask(how:i32, set:*anyopaque, oset:*anyopaque) callconv(std.builtin.CallingConvention.SysV) i64 {
+    _=&how;
+    _=&set;
+    _=&oset;
+
+    return 0;
+}
+pub export fn sysRseq(addr:u64, len:u32, flags:i32, s:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    _=&addr; // add this to Task
+    _=&len;
+    _=&flags;
+    _=&s;
+    return 0;
+}
+
+pub export fn sysKill(pid:i32, s:i32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    if (task.getTask(@intCast(pid))) |t| { // TODO: handle signals
+       task.taskExit(t, 0); 
+    }
+    // TODO: not implemented
+    //taskExit(0);
+    _=&pid;
+    _=&s;
+    return 0;
+}
+
+pub export fn sysTKill(tid:u32, s:i32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    task.taskExit(task.getTask(tid).?, 0);
+    _=&tid;
+    _=&s;
+    return 0;
+}
+const task = @import("task.zig");
+const syscall = @import("syscall.zig");
+pub fn init() void {
+    syscall.registerSysCall(syscall.SysCallNo.sys_rseq, &sysRseq);
+    syscall.registerSysCall(syscall.SysCallNo.sys_rt_sigaction, &sysRtSigAction);
+    syscall.registerSysCall(syscall.SysCallNo.sys_rt_sigreturn, &sysRtSigReturn);
+    syscall.registerSysCall(syscall.SysCallNo.sys_rt_sigprocmask, &sysRtSigProcMask);
+    syscall.registerSysCall(syscall.SysCallNo.sys_rt_sigsuspend, &sysRtSigSuspend);
+    syscall.registerSysCall(syscall.SysCallNo.sys_tkill, &sysTKill);
+    syscall.registerSysCall(syscall.SysCallNo.sys_kill, &sysKill);
+}

@@ -205,6 +205,9 @@ pub fn exec(file: [*:0]const u8, args:?[*:null]?[*:0]const u8, env:?[*:null]?[*:
 
     //);
     is.rflags = flags.enumBitOr(.{flags.X86Flags.X86_EFLAGS_IF_BIT});
+
+    cur.pid = cur.id; // process
+    cur.threads = .{};
 }
 
 inline fn addAUXEntry(at:[*]u64, id:u64, v:u64) [*]u64 {

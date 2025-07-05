@@ -651,6 +651,10 @@ const MCache = struct {
     pub fn free(a: [*]u8) void {
         const addr :u64 = @intFromPtr(a);
         const p: *Page = virtAddrToPage(addr);
+        if (p.objs == 0) {
+            console.print("already freed:{any}!\n", .{a});
+            return;
+        }
         const m: *MCache = @ptrCast(@alignCast(p.owner));
         const idx = (addr & page_mask) / mem_sizes[m.cls];
         setBit(m, p, idx, true);
