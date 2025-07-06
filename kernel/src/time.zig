@@ -63,6 +63,11 @@ fn wakeUp(t:*Timer) void {
     task.wakeup(@as(*task.WaitQueue, @alignCast(@ptrCast(t.ctx))));
 }
 
+fn onExit(ctx:?*anyopaque, _:*task.Task) void {
+    const timer:*Timer = @ptrCast(@alignCast(ctx));
+    removeTimer(timer);
+}
+
 const console = @import("console.zig");
 pub fn sleep(t: Time) void {
     var now = getTime();
@@ -72,6 +77,7 @@ pub fn sleep(t: Time) void {
     var cur = task.getCurrentTask();
     const v = lock.cli();
     defer lock.sti(v);
+    if (cur.state == .dead) task.schedule();
     while (expire.getAsMilliSeconds() > now.getAsMilliSeconds()) {
         cur.state = .sleep;
         var wq = task.WaitQueue{};
@@ -79,6 +85,8 @@ pub fn sleep(t: Time) void {
         wq.append(&node);
         var timer = Timer{.ctx = &wq, .func = &wakeUp, .repeat = 0, .next_fire = expire.getAsMilliSeconds()};
         addTimer(&timer);
+        var l = task.TaskListener{.ctx = &timer, .func = &onExit};
+        cur.registerExitListener(&l);
         lock.sti(true);
         task.schedule();
         _=lock.cli();
@@ -105,6 +113,7 @@ pub fn init() void {
     time = now;
     con.timeReady(&getBootTime);
     syscall.registerSysCall(syscall.SysCallNo.sys_nanosleep, &sysNanoSleep);
+    syscall.registerSysCall(syscall.SysCallNo.sys_clock_nanosleep, &sysCloskNanoSleep);
     syscall.registerSysCall(syscall.SysCallNo.sys_clock_gettime, &sysClockGetTime);
 }
 
@@ -117,6 +126,14 @@ pub export fn sysClockGetTime(clock_id:i32, ret:*Time) callconv(std.builtin.Call
 
 pub export fn sysNanoSleep(duration:*Time, rem:?*Time) callconv(std.builtin.CallingConvention.SysV) i64 {
     sleep(duration.*);
+    _=&rem;
+    return 0;
+}
+
+pub export fn sysCloskNanoSleep(clk_id: u32, flags:u32, duration:*Time, rem:?*Time) callconv(std.builtin.CallingConvention.SysV) i64 {
+    sleep(duration.*);
+    _=&clk_id;
+    _=&flags;
     _=&rem;
     return 0;
 }

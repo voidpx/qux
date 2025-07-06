@@ -289,6 +289,14 @@ pub const User = struct {
     // ... more
 };
 
+pub const TaskListener = struct {
+    ctx:?*anyopaque = null,
+    func:*const fn(ctx:?*anyopaque, t:*Task) void,
+    node:TaskListenerList.Node = undefined,
+};
+
+const TaskListenerList = std.DoublyLinkedList(*TaskListener);
+
 pub const Task = struct {
     list:TaskList.Node = undefined, 
     child_link:TaskList.Node = undefined,
@@ -312,6 +320,12 @@ pub const Task = struct {
     sig_actions:[64]sig.SigAction = .{sig.SigAction{}}**64,
     threads:TaskList = .{},
     thread_link:TaskList.Node = undefined,
+    exit_listeners: TaskListenerList = .{},
+
+    pub fn registerExitListener(t:*@This(), l:*TaskListener) void {
+        l.node.data = l;
+        t.exit_listeners.append(&l.node); 
+    }
 
     pub fn signalOn(t:*@This(), s: sig.Signal) bool {
         return (t.signal & (@as(u64, 1) << @truncate(@intFromEnum(s) - 1))) > 0;
@@ -355,6 +369,8 @@ pub const Task = struct {
     }
 
     pub fn die(this:*@This()) void {
+        const l = lock.cli();
+        defer lock.sti(l);
         this.fs.put();
         this.mem.put();
         mem.allocator.destroy(@as(*TaskStack, @ptrFromInt(this.stack)));
@@ -445,25 +461,22 @@ pub fn init() void {
 pub export fn sysWait4(pid:i32, status:*i32, option:i32, ru:?*anyopaque) callconv(std.builtin.CallingConvention.SysV) i64 {
     const l = lock.cli();
     defer lock.sti(l);
-    var t:?*Task = null;
+    var t:*Task = undefined;
     if (pid == -1) {
         const p = getCurrentTask();
         if (p.children.len > 0) {
             t = @ptrCast(p.children.first.?.data);
         } else {
-            return 0;
-        }
-    } else {
-        if (getTask(@intCast(pid))) |p| {
-            t = p;
-        } else {
             return -1;
         }
+    } else {
+        t = getTask(@intCast(pid)) orelse return -1;
     }
     _=&status;
     _=&option;
     _=&ru;
-    return t.?.wait();
+    _ = t.wait();
+    return t.id;
 }
 
 pub export fn sysGetCwd(buf:[*]u8, size:usize) callconv(std.builtin.CallingConvention.SysV) i64 {
@@ -839,10 +852,7 @@ fn pickTask() *Task {
             break;
         }
     }
-    if (picked == null) {
-        picked = &init_task;
-    }
-    return picked.?;
+    return picked orelse &init_task;
 }
 
 
@@ -866,6 +876,10 @@ fn exitTask(t:*Task, code:u16) void {
         p.children.remove(&t.child_link);
         p.sendSignal(.chld); //TODO: handle this
     }
+    while (t.exit_listeners.popFirst()) |n| {
+        const l = n.data;
+        l.func(l.ctx, t);
+    }
     wakeup(&t.exit_wq);
 }
 
@@ -884,6 +898,7 @@ pub fn taskExit(t:*Task, code: u16) callconv(std.builtin.CallingConvention.SysV)
 }
 
 fn addToRunQueue(t:*Task) void {
+    if (t.state == .dead) return;
     t.state = .runnable;
     runq.add(t) catch unreachable; // XXX: handle this
 }
