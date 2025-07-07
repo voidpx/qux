@@ -90,6 +90,7 @@ pub fn sleep(t: Time) void {
         lock.sti(true);
         task.schedule();
         _=lock.cli();
+        cur.removeExitListener(&l);
         now = getTime();
     }
 }

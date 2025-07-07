@@ -95,7 +95,9 @@ pub fn handleSignal(s:i32) void {
     const t = task.getCurrentTask();
     const act = t.sig_actions[@intCast(s)];
     const handler = act.handler orelse {
-        task.taskExit(t, 1); 
+        if (t.id > 1) {
+            task.taskExit(t, 1); 
+        }
         return;
     };
     const regs = task.getCurrentState();

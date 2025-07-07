@@ -322,16 +322,19 @@ fn consoleIoCtl(file:*fs.File, cmd:u32, arg:u64) i64 {
 }
 
 fn consoleFileRead(_:*fs.File, buf:[]u8) anyerror![]u8 {
-    var l = lock.cli();
+    const l = lock.cli();
     defer lock.sti(l);
     while (input_buf.isEmpty()) {
         const t = task.getCurrentTask();
         var n = task.WaitQueue.Node{.data = t}; 
-        t.state = .sleep;
+        t.state = .blocked;
         input_wq.append(&n);
-        lock.sti(l);
+        lock.sti(true);
         task.schedule();
-        l = lock.cli();
+        _ = lock.cli();
+        if (input_wq.len > 0) {
+            input_wq.remove(&n);
+        }
     }
     const len = @min(buf.len, input_buf.len());
     try input_buf.readFirst(buf, len);

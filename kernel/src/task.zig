@@ -231,6 +231,11 @@ pub const TaskFs = struct {
             const of = this.open_files.items[i] orelse continue;
             f.open_files.items[i] = of.get();
         }
+        f.cwd = this.cwd.?.copy() catch {
+            this.cwd = null;
+            this.drop();
+            return error.OutOfMemory;
+        };
         return f;
     }
 
@@ -279,7 +284,9 @@ pub const TaskFs = struct {
                 f.put();
             }
         }
-        self.cwd.?.fs.ops.free_path(self.cwd.?.fs, self.cwd.?);
+        if (self.cwd) |w| {
+            w.fs.ops.free_path(self.cwd.?.fs, self.cwd.?);
+        }
         self.open_files.deinit();
     }
 };
@@ -323,8 +330,16 @@ pub const Task = struct {
     exit_listeners: TaskListenerList = .{},
 
     pub fn registerExitListener(t:*@This(), l:*TaskListener) void {
+        const f = lock.cli();
+        defer lock.sti(f);
         l.node.data = l;
         t.exit_listeners.append(&l.node); 
+    }
+
+    pub fn removeExitListener(t:*@This(), l:*TaskListener) void {
+        const f = lock.cli();
+        defer lock.sti(f);
+        t.exit_listeners.remove(&l.node);
     }
 
     pub fn signalOn(t:*@This(), s: sig.Signal) bool {
@@ -426,7 +441,7 @@ pub fn init() void {
     init_task.mem.pgd = @ptrFromInt(mem.k_pgd);
     init_task.state = .running;
     init_task.fs = TaskFs.new() catch unreachable;
-    init_task.fs.cwd = fs.mounted_fs.root;
+    init_task.fs.cwd = fs.mounted_fs.root.copy() catch unreachable;
     init_task.fs.installFd(0, console.stdin);
     init_task.fs.installFd(1, console.stdout);
     init_task.fs.installFd(2, console.stderr);
@@ -863,12 +878,12 @@ pub export fn sysExit(code: u16) callconv(std.builtin.CallingConvention.SysV) vo
 fn exitTask(t:*Task, code:u16) void {
     if (t.state == .dead) return;
     if (t.id == t.pid) { // the process
-        console.print("process exit: {}\n", .{t.id});
+        //console.print("process exit: {}\n", .{t.id});
         while (t.threads.popFirst()) |n| {
            exitTask(n.data, code); 
         }
     } else {
-        console.print("thread exit: {}\n", .{t.id});
+        //console.print("thread exit: {}\n", .{t.id});
     }
     t.exit_code = code;
     t.state = .dead;
@@ -880,6 +895,7 @@ fn exitTask(t:*Task, code:u16) void {
         const l = n.data;
         l.func(l.ctx, t);
     }
+    task_list.remove(&t.list);
     wakeup(&t.exit_wq);
 }
 
@@ -941,8 +957,8 @@ pub fn schedule() void {
 extern fn newTaskEntry() void;
 
 pub fn getCurrentState() *idt.IntState {
-    const state = getCurrentTask().stack + task_stack_size - @sizeOf(idt.IntState);
-    return @ptrFromInt(state);
+    const state = taskRegs(getCurrentTask());
+    return state;
 }
 
 pub fn getCurrentSP0() u64 {
@@ -975,6 +991,7 @@ fn setupTask(a:*const CloneArgs, task:*Task, cur:*Task) !void {
         frame.rbx = @intFromPtr(f);
         frame.r12 = if (a.arg) |arg| @intFromPtr(arg) else 0;
         try task.mem.get();
+        task.fs = task.fs.get() orelse unreachable;
     } else {
         frame.rbx = 0;
         frame.rbp = 0;
@@ -988,33 +1005,32 @@ fn setupTask(a:*const CloneArgs, task:*Task, cur:*Task) !void {
         if (a.ustack != 0) {
             taskRegs(task).rsp = a.ustack;
         }
-    }
-    if (!a.shareVM()) { // process
-        task.pid = task.id;
-        task.mem = cur.mem.clone() catch unreachable;
-        task.fs = try cur.fs.clone();
-        task.fs.cwd = cur.fs.cwd; // TODO: copy the Path
-        task.fs.installFd(0, cur.fs.open_files.items[0].?.get().?);
-        task.fs.installFd(1, cur.fs.open_files.items[1].?.get().?);
-        task.fs.installFd(2, cur.fs.open_files.items[2].?.get().?);
+        if (!a.shareVM()) { // process
+            task.pid = task.id;
+            task.mem = cur.mem.clone() catch unreachable;
+            task.fs = try cur.fs.clone();
+            task.fs.installFd(0, cur.fs.open_files.items[0].?.get().?);
+            task.fs.installFd(1, cur.fs.open_files.items[1].?.get().?);
+            task.fs.installFd(2, cur.fs.open_files.items[2].?.get().?);
 
-    } else { // thread
-        task.pid = cur.pid;
-        try task.mem.get();
-        task.fs = cur.fs.get().?;
-        const proc = getTask(cur.pid) orelse unreachable;
-        task.thread_link = .{.data = task};
-        proc.threads.append(&task.thread_link);
-    }
-    if (a.tls != 0) {
-        task.mem.fsbase = a.tls;
+        } else { // thread
+            task.pid = cur.pid;
+            try task.mem.get();
+            task.fs = cur.fs.get().?;
+            const proc = getTask(cur.pid) orelse unreachable;
+            task.thread_link = .{.data = task};
+            proc.threads.append(&task.thread_link);
+        }
+        if (a.tls != 0) {
+            task.mem.fsbase = a.tls;
+        }
     }
     task.list = .{.prev = null, .next = null, .data = task};
+    task_list.append(&task.list);
     task.sp = fp;
     task.parent = cur;
     task.child_link.data = task;
     cur.children.append(&task.child_link);
-    task_list.append(&task.list);
     task.sched = .{};
     task.sched.share = if (runq.peek()) |t| t.sched.share else 0; 
 }

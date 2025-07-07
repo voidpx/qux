@@ -208,6 +208,11 @@ pub fn exec(file: [*:0]const u8, args:?[*:null]?[*:0]const u8, env:?[*:null]?[*:
 
     cur.pid = cur.id; // process
     cur.threads = .{};
+
+    // fs
+    const ofs = cur.fs;
+    defer ofs.put();
+    cur.fs = ofs.clone() catch {task.taskExit(cur, 1); unreachable;};
 }
 
 inline fn addAUXEntry(at:[*]u64, id:u64, v:u64) [*]u64 {

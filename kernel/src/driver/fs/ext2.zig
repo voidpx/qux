@@ -245,18 +245,25 @@ const DirEntObj = struct {
     name:[]const u8,
     fn new(d:*DirEntry) !*DirEntObj {
         const p = try obj.new(@This(), null, &dtor);
+        const pn:[*]u8 = @ptrCast(&d.name);
+        p.name = try copyName(pn[0..d.name_len]);
         p.dentry = d.*;
-        const n = try allocator.alloc(u8, d.name_len);
-        @memcpy(n, @as([*]u8, @ptrCast(&d.name)));
-        p.name = n;
         return p;
+    }
+    fn copyName(name:[]u8) ![]u8 {
+        const n = try allocator.alloc(u8, name.len);
+        @memcpy(n, name);
+        return n;
     }
     fn dtor(this:*@This()) void {
         allocator.free(this.name);
     }
 
     fn copy(this:*@This()) !*DirEntObj {
-       return DirEntObj.new(this.dentry); 
+        const p = try obj.new(@This(), null, &dtor);
+        p.name = try copyName(this.name);
+        p.dentry = this.dentry;
+        return p;
     }
 };
 
