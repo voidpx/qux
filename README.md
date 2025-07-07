@@ -2,7 +2,7 @@
 
 Qux is a toy operating system for x64 written in zig.
 
-![It can run doom!](doom.gif)
+![run command with dash!](qux.gif)
 
 ### Build and run
 
@@ -15,12 +15,13 @@ Qux is a toy operating system for x64 written in zig.
 
 ### What's implemented
 
-- [x] memory management
+- [x] basic memory management
 - [x] basic process management/scheduling
 - [x] basic ATA driver
 - [x] ext2 file system, read only so far
 - [x] syscalls, trying to implement Linux syscalls, so that userspace programs for Linux could hopefully run on Qux 
 - [x] basic ELF loader
+- [x] use dash (recompiled with musl-gcc as static executable) as the shell
 - [x] can run doom(doomgeneric), kind of :), key handling is still to be done
 
 ### TODO
@@ -28,5 +29,6 @@ Qux is a toy operating system for x64 written in zig.
 - [ ] network stack
 - [ ] SMP support
 - [ ] more syscalls
+- [ ] implement dynamic loading so that linux programs can run without recompiling??
 - [ ] port some usefull userspace programs
 
