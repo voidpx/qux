@@ -91,7 +91,19 @@ pub const SigAction = struct {
     sigset:u64 = 0
 };
 
-pub fn handleSignal(s:i32) void {
+pub fn handleSignals(t:*task.Task) void {
+    const fields = @typeInfo(Signal).@"enum".fields;
+    inline for (fields) |f| {
+        const s:Signal = @enumFromInt(f.value);
+        if (t.signalOn(s)) {
+            t.clearSignal(s);
+            handleSignal(f.value);
+            
+        }
+    }
+}
+
+fn handleSignal(s:i32) void {
     const t = task.getCurrentTask();
     const act = t.sig_actions[@intCast(s)];
     const handler = act.handler orelse {
@@ -100,6 +112,7 @@ pub fn handleSignal(s:i32) void {
         }
         return;
     };
+    console.print("handling signal {}, task:0x{x}\n", .{s, @as(u64, @intFromPtr(t))});
     const regs = task.getCurrentState();
     const fsp = std.mem.alignBackward(u64, regs.rsp - 128 - @sizeOf(SigFrame), 16);
     const sigframe:*SigFrame = @ptrFromInt(fsp);
@@ -169,8 +182,9 @@ pub export fn sysRtSigReturn() callconv(std.builtin.CallingConvention.SysV) i64 
     regs.rcx  =   sigframe.context.cx; 
     regs.rsp  =   sigframe.context.sp; 
     regs.rip  =   sigframe.context.ip; 
+    regs.syscall_no = -1;
 
-    return 0;
+    return @intCast(regs.rax);
 }
 
 pub export fn sysRtSigAction(s:i32, act:?*SigAction, oact:?*SigAction, 

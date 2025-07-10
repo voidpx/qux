@@ -41,15 +41,25 @@ comptime {
             \\ push $0
             \\ push %rax
             \\
-            \\entry_call syscall, 1
+            \\entry_call syscall, exit_call,  1
             \\  
             \\.popsection  
             \\
     );
 }
 
-export fn syscall(state: *idt.IntState, no: u64) callconv(std.builtin.CallingConvention.SysV) u64 {
-    _ = &state; 
+const sig = @import("signal.zig");
+/// interrupt/syscall exit call
+pub export fn exit_call(state: *idt.IntState) callconv(std.builtin.CallingConvention.SysV) void {
+    const regs = task.getCurrentState();
+    if (regs != state) { // syscall/isr interrupted, don't handle signal
+        return;
+    }
+    // handle signal here
+    sig.handleSignals(task.getCurrentTask());
+}
+
+export fn syscall(state: *idt.IntState, no: u64) callconv(std.builtin.CallingConvention.SysV) void {
     //console.print("state: {any}\n", .{state});
     //console.print("syscall: {}\n", .{@as(SysCallNo, @enumFromInt(no))});
     const f = syscall_tb[no] orelse std.debug.panic("syscall not implemented: {}\n", .{no}); 
@@ -66,7 +76,7 @@ export fn syscall(state: *idt.IntState, no: u64) callconv(std.builtin.CallingCon
           [r9] "{r9}" (state.r9),
           [r11] "{r11}" (f),
     );
-    return ret;
+    state.rax = ret;
 }
 
 // max number of sys calls

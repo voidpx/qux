@@ -98,7 +98,7 @@ pub fn exec(file: [*:0]const u8, args:?[*:null]?[*:0]const u8, env:?[*:null]?[*:
     const l = lock.cli();
     defer lock.sti(l);
     var st:fs.Stat = undefined;
-    if (fs.sysStat(file, &st) == -1) {
+    if (fs.sysStat(file, &st) == -1 and st.st_mode == 0) {
         return error.ErrorStatFile;
     }
     const f = fs.sysOpen(file, 0, 0);

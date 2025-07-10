@@ -154,7 +154,7 @@ pub export fn sysMkDir(path: [*:0]const u8, mode:u16) callconv(std.builtin.Calli
 pub export fn sysStat(path: [*:0]const u8, st:*Stat) callconv(std.builtin.CallingConvention.SysV) i64 {
     const len = std.mem.len(path);
     const p = mounted_fs.ops.lookup(mounted_fs, path[0..len], 0) catch {
-        return -1;
+        return -4; // NOENT
     };
     defer mounted_fs.ops.free_path(mounted_fs, p);
     return mounted_fs.ops.stat(mounted_fs, p, st) catch return -1;

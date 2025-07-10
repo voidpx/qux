@@ -4,8 +4,8 @@ const console = @import("console.zig");
 const fbcon = @import("ui/fbcon.zig");
 const gdt = @import("gdt.zig");
 const idt = @import("idt.zig");
-const k_base: u64 = 0xffff800000000000;//k_map.KERNEL_BASE; //0xffff800000000000;
-const k_page_map: u64 = 0xffffc00000000000;
+pub const k_base: u64 = 0xffff800000000000;//k_map.KERNEL_BASE; //0xffff800000000000;
+pub const k_page_map: u64 = 0xffffc00000000000;
 
 pub const user_min:u64 = page_size;
 pub const user_max:u64 = (@as(u64, 1)<<47) - page_size; // exclusive

@@ -28,7 +28,7 @@ const rand = @import("random.zig");
 const ipc = @import("ipc.zig");
 
 export fn startKernel(b: *bi.BootInfo) callconv(std.builtin.CallingConvention.SysV) void {
-    cpu.enableSSE() catch unreachable; // don't enable sse in kernel
+    cpu.enableSSE() catch unreachable;
     //bi.init(b);
     @import("asm.zig").init(); // make sure the asm macros are available early
     console.init();
@@ -56,6 +56,11 @@ export fn startKernel(b: *bi.BootInfo) callconv(std.builtin.CallingConvention.Sy
     pic.sti();
     
     kthread.createUserThread("init", &initThread, null);
+
+    //task.startSchedRoutine();
+
+    //XXX: debug mem
+    //kthread.createKThread("mem-watch", &printMemStat, null);
 
     //kthread.createKThread("loop", &loop, null);
 
@@ -119,11 +124,6 @@ fn reaper(_:?*anyopaque) u16 {
 
 fn initThread(_:?*anyopaque) u16 {
     pci.walkPci();
-    //task.startSchedRoutine();
-
-    //XXX: debug mem
-    //kthread.createKThread("mem-watch", &printMemStat, null);
-
    //     const m = mem.getMemStat();
    //     console.print("memory: used pages: {}, free pages: {}, total tasks: {}\n", .{m.used_pages, m.free_pages, task.getTotalTasks()});
    //     console.print("runq, size: {}, capacity: {}\n", .{task.runq.len, task.runq.capacity()});
@@ -150,10 +150,10 @@ fn initThread(_:?*anyopaque) u16 {
 fn printMemStat(_: ?*anyopaque) u16 {
     while (true) {
         time.sleep(.{.sec = 5});
-        task.runq.shrinkAndFree(@min(@max(task.runq.len, 10), task.runq.capacity()));
+        task.runq.shrinkAndFree(@min(@max(task.runq.count(), 10), task.runq.capacity()));
         const m = mem.getMemStat();
         console.print("memory: used pages: {}, free pages: {}, total tasks: {}\n", .{m.used_pages, m.free_pages, task.getTotalTasks()});
-        console.print("runq, size: {}, capacity: {}\n", .{task.runq.len, task.runq.capacity()});
+        console.print("runq, size: {}, capacity: {}\n", .{task.runq.count(), task.runq.capacity()});
     }
 
 }

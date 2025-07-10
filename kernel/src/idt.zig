@@ -5,6 +5,7 @@ const pic = @import("pic.zig");
 const num_ex = 32;
 const num_hwint = 16;
 pub const IntState = extern struct {
+    syscall_no:i64, // on interrupt, it's -1, on syscall, it's the syscall no 
     r15: u64,
     r14: u64,
     r13: u64,
@@ -104,10 +105,11 @@ comptime {
         \\.endr
         \\
         \\_idt_entry:
-        \\ entry_call handle_interrupt
+        \\ entry_call handle_interrupt, exit_call
         \\.popsection
     );
 }
+
 const ex = @extern([*][INT_ENTRY_SIZE]u8,
     std.builtin.ExternOptions{ .name = "__exception_handlers" });
 

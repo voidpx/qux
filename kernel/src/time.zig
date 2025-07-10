@@ -69,30 +69,37 @@ fn onExit(ctx:?*anyopaque, _:*task.Task) void {
 }
 
 const console = @import("console.zig");
-pub fn sleep(t: Time) void {
+pub fn sleep(t: *const Time, rem:?*Time) i32 {
+    if (rem) |r| r.* = .{};
     var now = getTime();
     var dup = now;
-    const expire = dup.add(t);
-
+    const expire = dup.add(t.*);
+    if (expire.getAsMilliSeconds() <= now.getAsMilliSeconds()) return 0;
     var cur = task.getCurrentTask();
     const v = lock.cli();
     defer lock.sti(v);
     if (cur.state == .dead) task.schedule();
-    while (expire.getAsMilliSeconds() > now.getAsMilliSeconds()) {
-        cur.state = .sleep;
-        var wq = task.WaitQueue{};
-        var node:task.WaitQueue.Node = .{.data = cur};
-        wq.append(&node);
-        var timer = Timer{.ctx = &wq, .func = &wakeUp, .repeat = 0, .next_fire = expire.getAsMilliSeconds()};
-        addTimer(&timer);
-        var l = task.TaskListener{.ctx = &timer, .func = &onExit};
-        cur.registerExitListener(&l);
-        lock.sti(true);
-        task.schedule();
-        _=lock.cli();
-        cur.removeExitListener(&l);
-        now = getTime();
+    cur.state = .sleep;
+    var wq = task.WaitQueue{};
+    var node:task.WaitQueue.Node = .{.data = cur};
+    wq.append(&node);
+    var timer = Timer{.ctx = &wq, .func = &wakeUp, .repeat = 0, .next_fire = expire.getAsMilliSeconds()};
+    addTimer(&timer);
+    var l = task.TaskListener{.ctx = &timer, .func = &onExit};
+    cur.registerExitListener(&l);
+    task.scheduleWithIF();
+    cur.removeExitListener(&l);
+
+    removeTimer(&timer); // in case it wasn't waked up by the timer
+    now = getTime();
+    if (expire.getAsMilliSeconds() <= now.getAsMilliSeconds()) return 0;
+    if (rem) |r| {
+        const ms = expire.getAsMilliSeconds() - now.getAsMilliSeconds();
+        r.sec = @divFloor(ms, 1000);
+        r.nsec = @mod(ms, 1000);
+        return -1;
     }
+    return -1;
 }
 
 pub fn getTime() Time {
@@ -118,6 +125,10 @@ pub fn init() void {
     syscall.registerSysCall(syscall.SysCallNo.sys_clock_gettime, &sysClockGetTime);
 }
 
+var expired_timers:TimerList = .{};
+
+
+
 pub export fn sysClockGetTime(clock_id:i32, ret:*Time) callconv(std.builtin.CallingConvention.SysV) i64 {
     _=&clock_id;
     const t =getTime();   
@@ -126,17 +137,13 @@ pub export fn sysClockGetTime(clock_id:i32, ret:*Time) callconv(std.builtin.Call
 }
 
 pub export fn sysNanoSleep(duration:*Time, rem:?*Time) callconv(std.builtin.CallingConvention.SysV) i64 {
-    sleep(duration.*);
-    _=&rem;
-    return 0;
+    return sleep(duration, rem);
 }
 
 pub export fn sysCloskNanoSleep(clk_id: u32, flags:u32, duration:*Time, rem:?*Time) callconv(std.builtin.CallingConvention.SysV) i64 {
-    sleep(duration.*);
     _=&clk_id;
     _=&flags;
-    _=&rem;
-    return 0;
+    return sleep(duration, rem);
 }
 
 fn getBootTime() u64 {
@@ -173,7 +180,11 @@ pub fn addTimer(timer: *Timer) void {
 pub fn removeTimer(timer: *Timer) void {
     const v = lock.cli();
     defer lock.sti(v);
-    timers.remove(&timer.node);
+    if (timer.node.prev != null or timer.node.next != null) {
+        timers.remove(&timer.node);
+        timer.node.prev = null;
+        timer.node.next = null;
+    }
 }
 
 fn makeTime(t: rtc.RTC) Time {

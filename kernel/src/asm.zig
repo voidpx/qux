@@ -1,7 +1,7 @@
 comptime {
     asm (
     \\
-    \\.macro save_regs
+    \\.macro save_regs scret=0
     \\ push %rdi 
     \\ push %rsi
     \\ push %rdx
@@ -17,9 +17,15 @@ comptime {
     \\ push %r13
     \\ push %r14
     \\ push %r15
+    \\.if \scret == 1
+    \\ push %rax
+    \\.else
+    \\ pushq $-1 // -1 if not from interrupt
+    \\.endif
     \\.endm
     \\
-    \\.macro restore_regs scret=0
+    \\.macro restore_regs 
+    \\ add $8, %rsp // sysno
     \\ pop %r15
     \\ pop %r14
     \\ pop %r13
@@ -30,11 +36,7 @@ comptime {
     \\ pop %r10
     \\ pop %r9
     \\ pop %r8
-    \\.if \scret == 1 // syscall use rax for return value
-    \\ pop %rcx
-    \\.else
     \\ pop %rax
-    \\.endif
     \\ pop %rcx
     \\ pop %rdx
     \\ pop %rsi
@@ -58,19 +60,21 @@ comptime {
     \\ mov \reg, %rsp // restore the stack after func call
     \\.endm
     \\
-    \\.macro entry_call_return scret=0
-    \\restore_regs \scret
+    \\.macro entry_call_return exit_func:req
+    \\ mov %rsp, %rdi
+    \\ call \exit_func
+    \\restore_regs 
     \\ add $16, %rsp
     \\ iretq
     \\.endm
     \\
-    \\.macro entry_call func:req, scret=0
-    \\save_regs 
+    \\.macro entry_call func:req, exit_func:req, scret=0 
+    \\save_regs \scret
     \\ mov $0, %rbp // stop stack unwinding for interrupt handler?
     \\ mov %rsp, %rdi // *IntState
-    \\ mov 120(%rsp), %rsi // vector 
+    \\ mov 128(%rsp), %rsi // vector, keep async with IntState 
     \\ align_stack_call \func
-    \\entry_call_return \scret
+    \\entry_call_return \exit_func 
     \\.endm
     \\
     );

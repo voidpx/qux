@@ -74,7 +74,7 @@ pub const LineBuffer = struct {
     last:?*Line = null,
     lines:usize = 0,
     line_control:*const LineControl,
-    const max_lines:usize = 1000;
+    const max_lines:usize = 100;
     pub fn new(lc:*LineControl) LineBuffer {
         return .{.line_control = lc};
     }

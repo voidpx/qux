@@ -404,11 +404,10 @@ pub const Task = struct {
         while (this.state != .dead) {
             this.exit_wq.append(&node);
             t.state = .blocked;
-            lock.sti(true);
-            schedule();
-            _=lock.cli();
+            scheduleWithIF();
         }
         const exit_code = this.exit_code;
+        t.clearSignal(.chld);
         this.die();
         return exit_code;
     }
@@ -523,6 +522,7 @@ pub export fn sysFork() callconv(std.builtin.CallingConvention.SysV) i64 {
     const ca = CloneArgs{
     };
     const pid = clone(&ca) catch return -1;
+    //console.print("fork {}\n", .{pid});
     return pid;
 }
 
@@ -738,7 +738,7 @@ pub fn startSchedRoutine() void {
 
 fn schedRoutine(_:?*anyopaque) u16 {
     while (true) {     
-        time.sleep(.{.sec = 5 * 60});
+        _=time.sleep(&.{.sec = 5 * 60}, null);
         const v = lock.cli();
         defer lock.sti(v);
         const min = if (runq.peek()) |f| f.sched.share else 0;
@@ -754,6 +754,8 @@ fn schedRoutine(_:?*anyopaque) u16 {
 }
 
 fn switchTask(cur:*Task, to:*Task) void {
+    //console.print("switch task 0x{x} => 0x{x}, {} => {}\n", 
+    //   .{@as(u64, @intFromPtr(cur)), @as(u64, @intFromPtr(to)), cur.id, to.id});
     cur_task = to;
     cur_task.clearResched();
     if (cur.mem.pgd != to.mem.pgd) {
@@ -795,22 +797,6 @@ export fn finishTaskSwitch(
         }
         getCurrentState().rax = 0;
     }
-    // TODO: handle signal
-    if (t.id != 0 and t.signal > 0) {
-        handleSignal(t);
-    }
-}
-
-fn handleSignal(t:*Task) void {
-    const fields = @typeInfo(sig.Signal).@"enum".fields;
-    inline for (fields) |f| {
-        const s:sig.Signal = @enumFromInt(f.value);
-        if (t.signalOn(s)) {
-            t.clearSignal(s);
-            sig.handleSignal(f.value);
-            
-        }
-    }
 }
 
 extern fn __switchTask(cur:*Task, to:*Task, cur_sp:*u64, next_sp:*u64) void;
@@ -830,7 +816,7 @@ comptime {
     \\  mov %rbx, %rdi //fn
     \\  mov $1, %rdx
     \\  call finishTaskSwitch
-    \\entry_call_return
+    \\entry_call_return exit_call
     \\  
     \\__switchTask:
     \\ push %r15
@@ -887,13 +873,13 @@ fn exitTask(t:*Task, code:u16) void {
     }
     t.exit_code = code;
     t.state = .dead;
-    if (t.parent) |p| {
-        p.children.remove(&t.child_link);
-        p.sendSignal(.chld); //TODO: handle this
-    }
     while (t.exit_listeners.popFirst()) |n| {
         const l = n.data;
         l.func(l.ctx, t);
+    }
+    if (t.parent) |p| {
+        p.children.remove(&t.child_link);
+        p.sendSignal(.chld); //TODO: handle this
     }
     task_list.remove(&t.list);
     wakeup(&t.exit_wq);
@@ -942,6 +928,13 @@ pub fn wakeup(wq:*WaitQueue) void {
 }
 
 const console = @import("console.zig");
+
+pub fn scheduleWithIF() void {
+    lock.sti(true);
+    schedule();
+    _=lock.cli();
+}
+    
 pub fn schedule() void {
     const cur = getCurrentTask();
     const cli = scheduleEnter(cur);
@@ -1029,6 +1022,8 @@ fn setupTask(a:*const CloneArgs, task:*Task, cur:*Task) !void {
     task_list.append(&task.list);
     task.sp = fp;
     task.parent = cur;
+    task.signal = 0;
+    task.sig_actions = .{sig.SigAction{}}**64;
     task.child_link.data = task;
     cur.children.append(&task.child_link);
     task.sched = .{};
