@@ -123,7 +123,7 @@ fn reaper(_:?*anyopaque) u16 {
 }
 
 fn initThread(_:?*anyopaque) u16 {
-    pci.walkPci();
+    pci.init();
    //     const m = mem.getMemStat();
    //     console.print("memory: used pages: {}, free pages: {}, total tasks: {}\n", .{m.used_pages, m.free_pages, task.getTotalTasks()});
    //     console.print("runq, size: {}, capacity: {}\n", .{task.runq.len, task.runq.capacity()});

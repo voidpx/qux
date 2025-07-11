@@ -6,6 +6,18 @@ const sig = @import("signal.zig");
 const TaskList = std.DoublyLinkedList(*Task);
 pub const WaitQueue = std.DoublyLinkedList(*Task);
 
+fn wqPop(wq:*WaitQueue) ?*WaitQueue.Node {
+    var n = wq.popFirst() orelse return null;
+    n.prev = null;
+    n.next = null;
+    return n;
+}
+
+fn wqRemove(wq:*WaitQueue, n:*WaitQueue.Node) void {
+    if ((n.prev == null and n.next == null) or wq.len == 0) return;
+    wq.remove(n);
+}
+
 pub const TaskState = enum(u8) {
     new,
     running,
@@ -312,7 +324,7 @@ pub const Task = struct {
     flags:u8 = 0,
     exit_code:u16 = 0,
     id:u32 = 0,
-    signal:u64 = 0,
+    signal:sig.TaskSignal = .{},
     parent:?*Task = null,
     children:TaskList = .{},
     mem:*Mem,
@@ -324,7 +336,6 @@ pub const Task = struct {
     pid:u32 = 0, // process id for threads
     user:User = .{},
     exit_wq:WaitQueue = .{},
-    sig_actions:[64]sig.SigAction = .{sig.SigAction{}}**64,
     threads:TaskList = .{},
     thread_link:TaskList.Node = undefined,
     exit_listeners: TaskListenerList = .{},
@@ -342,13 +353,6 @@ pub const Task = struct {
         t.exit_listeners.remove(&l.node);
     }
 
-    pub fn signalOn(t:*@This(), s: sig.Signal) bool {
-        return (t.signal & (@as(u64, 1) << @truncate(@intFromEnum(s) - 1))) > 0;
-    }
-
-    pub fn clearSignal(t:*@This(), s: sig.Signal) void {
-        t.signal &= ~(@as(u64, 1) << @truncate(@intFromEnum(s) - 1));
-    }
 
     pub fn needResched(t:*@This()) bool {
         return (t.flags & resched_bit) > 0;
@@ -379,7 +383,7 @@ pub const Task = struct {
     pub fn sendSignal(t:*@This(), s:sig.Signal) void {
         const l = lock.cli();
         defer lock.sti(l);
-        t.signal |= @as(u64, 1) << (@as(u6, @truncate(@intFromEnum(s))) - 1);
+        t.signal.setSignal(s); 
         wakeupTask(t);
     }
 
@@ -405,9 +409,11 @@ pub const Task = struct {
             this.exit_wq.append(&node);
             t.state = .blocked;
             scheduleWithIF();
+            // XXX: remove t from the wait queue if it wasn't woken up by child exit ??
+            //wqRemove(&this.exit_wq, &node);
         }
         const exit_code = this.exit_code;
-        t.clearSignal(.chld);
+        // let the waiter handle the chld signal even the waitee is dead
         this.die();
         return exit_code;
     }
@@ -921,7 +927,7 @@ fn wakeupTaskUnlocked(t:*Task) void {
 pub fn wakeup(wq:*WaitQueue) void {
     const v = lock.cli();
     defer lock.sti(v);
-    while (wq.popFirst()) |n| {
+    while (wqPop(wq)) |n| {
         const t = n.data;
         wakeupTaskUnlocked(t);
     }
@@ -1022,8 +1028,8 @@ fn setupTask(a:*const CloneArgs, task:*Task, cur:*Task) !void {
     task_list.append(&task.list);
     task.sp = fp;
     task.parent = cur;
-    task.signal = 0;
-    task.sig_actions = .{sig.SigAction{}}**64;
+    task.signal = .{};
+    task.signal.sig_actions = .{sig.SigAction{}}**64;
     task.child_link.data = task;
     cur.children.append(&task.child_link);
     task.sched = .{};

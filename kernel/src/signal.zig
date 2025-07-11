@@ -13,6 +13,40 @@ pub const SigFrame = extern struct {
     }
 };
 
+pub const TaskSignal = struct {
+    sig:u64 = 0,
+    mask_set:u64 = 0,
+    sig_actions:[64]SigAction = .{SigAction{}}**64,
+
+    pub fn signalOn(t:*@This(), s: Signal) bool {
+        const bit = @as(u64, 1) << @truncate(@intFromEnum(s) - 1);
+        if (t.mask_set & bit > 0) return false;
+        return (t.sig & bit) > 0;
+    }
+
+    pub fn clearSignal(t:*@This(), s: Signal) void {
+        t.sig &= ~(@as(u64, 1) << @truncate(@intFromEnum(s) - 1));
+    }
+
+    pub fn setSignal(t:*@This(), s:Signal) void {
+        t.sig |= @as(u64, 1) << (@as(u6, @truncate(@intFromEnum(s))) - 1);
+    }
+
+    pub fn mask(t:*@This(), set:*u64, oset:?*u64) void {
+        if (oset) |o| {
+            o.* = t.mask_set;
+        }
+        t.mask_set |= set.*;
+    }
+    
+    pub fn unmask(t:*@This(), set:*u64, oset:?*u64) void {
+        if (oset) |o| {
+            o.* = t.mask_set;
+        }
+        t.mask_set &= ~set.*;
+    }
+};
+
 pub const SigContext = extern struct {
     r8: u64,
     r9: u64,
@@ -95,8 +129,8 @@ pub fn handleSignals(t:*task.Task) void {
     const fields = @typeInfo(Signal).@"enum".fields;
     inline for (fields) |f| {
         const s:Signal = @enumFromInt(f.value);
-        if (t.signalOn(s)) {
-            t.clearSignal(s);
+        if (t.signal.signalOn(s)) {
+            t.signal.clearSignal(s);
             handleSignal(f.value);
             
         }
@@ -105,14 +139,14 @@ pub fn handleSignals(t:*task.Task) void {
 
 fn handleSignal(s:i32) void {
     const t = task.getCurrentTask();
-    const act = t.sig_actions[@intCast(s)];
+    const act = t.signal.sig_actions[@intCast(s)];
     const handler = act.handler orelse {
         if (t.id > 1) {
             task.taskExit(t, 1); 
         }
         return;
     };
-    console.print("handling signal {}, task:0x{x}\n", .{s, @as(u64, @intFromPtr(t))});
+    //console.print("handling signal {}, task:0x{x}\n", .{s, @as(u64, @intFromPtr(t))});
     const regs = task.getCurrentState();
     const fsp = std.mem.alignBackward(u64, regs.rsp - 128 - @sizeOf(SigFrame), 16);
     const sigframe:*SigFrame = @ptrFromInt(fsp);
@@ -192,7 +226,7 @@ pub export fn sysRtSigAction(s:i32, act:?*SigAction, oact:?*SigAction,
     if (s < 0 or s >= 64) return -1;
     const action = act orelse return -1;
     const t = task.getCurrentTask();
-    t.sig_actions[@intCast(s)] = action.*;
+    t.signal.sig_actions[@intCast(s)] = action.*;
 
     //console.print("sigaction: handler:{any}, sig:{}", .{act, s});
     _=&s; 
@@ -202,11 +236,22 @@ pub export fn sysRtSigAction(s:i32, act:?*SigAction, oact:?*SigAction,
     return 0;
 }
 
-pub export fn sysRtSigProcMask(how:i32, set:*anyopaque, oset:*anyopaque) callconv(std.builtin.CallingConvention.SysV) i64 {
+const SIG_BLOCK = 0;
+const SIG_UNBLOCK = 1;
+const SIG_SETMASK = 2;
+pub export fn sysRtSigProcMask(how:i32, set:*u64, oset:?*u64) callconv(std.builtin.CallingConvention.SysV) i64 {
     _=&how;
     _=&set;
     _=&oset;
-
+    //console.print("sigprocmask: how:0x{x}, set:0x{x}, oset:0x{x}\n", .{how, 
+    //    @as(u64, @intFromPtr(set)), @as(u64, @intFromPtr(oset))});
+    const s = &task.getCurrentTask().signal;
+    switch (how) {
+        SIG_BLOCK => s.mask(set, oset),
+        SIG_UNBLOCK => s.unmask(set, oset),
+        SIG_SETMASK => s.mask_set = set.*,
+        else => return -1
+    } 
     return 0;
 }
 pub export fn sysRseq(addr:u64, len:u32, flags:i32, s:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
@@ -214,6 +259,7 @@ pub export fn sysRseq(addr:u64, len:u32, flags:i32, s:u32) callconv(std.builtin.
     _=&len;
     _=&flags;
     _=&s;
+    console.print("rseq:0x{x}\n", .{addr});
     return 0;
 }
 
