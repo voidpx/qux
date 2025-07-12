@@ -1,6 +1,5 @@
 const gdt = @import("gdt.zig");
 const std = @import("std");
-const us = @import("userspace.zig");
 const elf = std.elf;
 const console = @import("console.zig");
 const mem = @import("mem.zig");
