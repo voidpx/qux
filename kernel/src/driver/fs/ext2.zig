@@ -1,11 +1,9 @@
-
 const std = @import("std");
 const blk = @import("../block.zig");
 const fs = @import("../../fs.zig");
 const task = @import("../../task.zig");
 const EXT2_SUPERBLOCK_OFFSET = 1024;
 const EXT2_SUPER_MAGIC = 0xEF53;
-const alloc = @import("../../mem.zig").allocator;
 var block_size:u32 = 1024; 
 const type_mask:u16 = 0xf000;
 const s_ifreg:u16 = 0x8000;
@@ -121,58 +119,78 @@ fn copyPath(mfs:*fs.MountedFs, path:fs.Path) anyerror!fs.Path {
     return p;
 }
 
-fn getBlockNum(n:*const INode, bi:u64) !u32 {
-    if (bi < direct_blk) return n.block[bi];
+fn readNodeBlock(n:*const INode, block_index:u64) ![*]u32 {
     const buf = try allocator.alloc(u8, block_size);
-    defer allocator.free(buf);
-    if (bi < single_indirect_blk) {
-        const block_num = n.block[direct_blk];
-        if (block_num == 0) return error.CorruptedFileSys;
-        const block_offset = block_num * block_size;
-        if (try bdev.read(block_offset, buf) != buf.len) return error.CorruptedFileSys;
-        const ia:[*] align(1) u32 = @ptrCast(buf.ptr);
-        return ia[bi - direct_blk];
-    }
-    if (bi < double_indirect_blk) {
-        var block_num = n.block[direct_blk + 1];
-        if (block_num == 0) return error.CorruptedFileSys;
-        var block_offset = block_num * block_size;
-        if (try bdev.read(block_offset, buf) != buf.len) return error.CorruptedFileSys;
-        var ia:[*] align(1) u32 = @ptrCast(buf.ptr);
-        var bii = (bi - single_indirect_blk)/entries_per_blk;
-        block_num = ia[bii];
-        if (block_num == 0) return error.CorruptedFileSys;
-        block_offset = block_num * block_size;
-        if (try bdev.read(block_offset, buf) != buf.len) return error.CorruptedFileSys;
-        ia = @ptrCast(buf.ptr);
-        bii = (bi - single_indirect_blk) % entries_per_blk;
-        return ia[bii];
-    }
-    if (bi < triple_indirect_blk) {
-        var block_num = n.block[direct_blk + 2];
-        if (block_num == 0) return error.CorruptedFileSys;
-        var block_offset = block_num * block_size;
-        if (try bdev.read(block_offset, buf) != buf.len) return error.CorruptedFileSys;
-        var ia:[*] align(1) u32 = @ptrCast(buf.ptr);
-        const epb2 = entries_per_blk*entries_per_blk;
-        var bii = (bi - double_indirect_blk)/epb2;
-        block_num = ia[bii];
-        if (block_num == 0) return error.CorruptedFileSys;
-        block_offset = block_num * block_size;
-        if (try bdev.read(block_offset, buf) != buf.len) return error.CorruptedFileSys;
-        ia = @ptrCast(buf.ptr);
-        const rem = (bi - double_indirect_blk) % epb2;
-        bii = rem/entries_per_blk;
-        block_num = ia[bii];
-        if (block_num == 0) return error.CorruptedFileSys;
-        block_offset = block_num * block_size;
-        if (try bdev.read(block_offset, buf) != buf.len) return error.CorruptedFileSys;
-        ia = @ptrCast(buf.ptr);
-        bii = rem%entries_per_blk;
-        return ia[bii];
-    }
-    return error.CorruptedFileSys;
+    const block_num = n.block[block_index];
+    if (block_num == 0) return error.CorruptedFileSys;
+    const block_offset = block_num * block_size;
+    if (try bdev.read(block_offset, buf) != buf.len) return error.CorruptedFileSys;
+    return @as([*]u32, @ptrCast(buf.ptr));
 }
+
+const bc = @import("../bcache.zig");
+
+fn getBlockNumRange(n:*const INode, sbi:u64, ebi:u64, bkn:[]u64) !void {
+    std.debug.assert(bkn.len == ebi - sbi);
+    var i:usize = 0;
+    var bcache = bc.BCache.new(bdev, block_size); 
+    defer bcache.drop();
+
+    for (sbi..ebi) |bi| {
+        defer {
+            if (bkn[i] == 0) {
+                std.debug.panic("bug\n", .{});
+            }
+            
+            i+=1;
+
+        }
+        if (bi < direct_blk) {
+            bkn[i] = n.block[bi];
+            continue;
+        }
+        if (bi < single_indirect_blk) {
+            const block_num = n.block[direct_blk];
+            if (block_num == 0) return error.CorruptedFileSys;
+            const ia:[*] align(1) u32 = @ptrCast((try bcache.getBlock(block_num)).ptr);
+            bkn[i] = ia[bi - direct_blk];
+            continue;
+        }
+        if (bi < double_indirect_blk) {
+            var block_num = n.block[direct_blk + 1];
+            if (block_num == 0) return error.CorruptedFileSys;
+            var ia:[*] align(1) u32 = @ptrCast((try bcache.getBlock(block_num)).ptr);
+            var bii = (bi - single_indirect_blk)/entries_per_blk;
+            block_num = ia[bii];
+            if (block_num == 0) return error.CorruptedFileSys;
+            ia = @ptrCast((try bcache.getBlock(block_num)).ptr);
+            bii = (bi - single_indirect_blk) % entries_per_blk;
+            bkn[i] = ia[bii];
+            continue;
+        }
+        if (bi < triple_indirect_blk) {
+            var block_num = n.block[direct_blk + 2];
+            if (block_num == 0) return error.CorruptedFileSys;
+            var ia:[*] align(1) u32 = @ptrCast((try bcache.getBlock(block_num)).ptr);
+            const epb2 = entries_per_blk*entries_per_blk;
+            var bii = (bi - double_indirect_blk)/epb2;
+            block_num = ia[bii];
+            if (block_num == 0) return error.CorruptedFileSys;
+            ia = @ptrCast((try bcache.getBlock(block_num)).ptr);
+            const rem = (bi - double_indirect_blk) % epb2;
+            bii = rem/entries_per_blk;
+            block_num = ia[bii];
+            if (block_num == 0) return error.CorruptedFileSys;
+            ia = @ptrCast((try bcache.getBlock(block_num)).ptr);
+            bii = rem%entries_per_blk;
+            bkn[i] = ia[bii];
+            continue;
+        }
+        return error.CorruptedFileSys;
+
+    }
+}
+
 fn write(file:*fs.File, buf:[]const u8) anyerror!usize {
     _=&file;
     _=&buf;
@@ -188,15 +206,18 @@ fn read(file:*fs.File, buf:[]u8) ![]u8 {
     const rsz = @min(buf.len, inode.size - file.pos);
     const eblk = (file.pos + rsz + block_size - 1)/block_size;
     var si:usize = 0;
-    for (sblk..eblk) |b| {
-        const bn = try getBlockNum(&inode, b);
+    const bkn = try allocator.alloc(u64, eblk - sblk);
+    defer allocator.free(bkn);
+    try getBlockNumRange(&inode, sblk, eblk, bkn);
+    for (0..bkn.len) |i| {
+        const bn = bkn[i];
         var offset:usize = 0;
         var len:usize = block_size;
-        if (b == sblk) {
+        if (i == 0) {
             offset = off;
             len-=offset;
         }
-        if (b == eblk - 1) {
+        if (i == bkn.len - 1) {
             const rem = (file.pos + rsz) % block_size;
             len -= (block_size - rem);
         }
@@ -211,7 +232,11 @@ pub fn init() void {
     bdev = blk.block_device.parts[0].?; // XXX: fisrt part has ext2 file system
 
     readSuperBlock(&super_block) catch unreachable;
-    console.print("SuperBlock Magic: {x}\n", .{super_block.magic});
+    //console.print("SuperBlock Magic: {x}\n", .{super_block.magic});
+    if (super_block.magic == EXT2_SUPER_MAGIC) {
+        console.print("ext2 file system detected\n", .{});
+    }
+
     block_size = @as(u32, 1024) << @as(u5, @truncate(super_block.log_block_size));
     entries_per_blk = block_size / @sizeOf(u32);
     single_indirect_blk = direct_blk + entries_per_blk;

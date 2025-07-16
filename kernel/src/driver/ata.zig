@@ -14,6 +14,11 @@ const ATA_REG_CONTROL  :u16 =   (ATA_PRIMARY_CTRL);
 
 const ATA_CMD_READ_PIO_EXT:u8 = 0x24;
 const ATA_CMD_IDENTIFY:u8 =     0xEC;
+
+const ATA_CMD_WRITE_PIO_EXT   = 0x34;
+const ATA_CMD_CACHE_FLUSH_EXT = 0xEA;
+
+
 const bytes_per_sector:u32 = 512;
 
 var disk_capacity:u64 = 0;
@@ -77,6 +82,44 @@ fn read(lba:u64, sector_count:u16, buffer:[]u16) io.IOError!void {
     try readNoCheck(lba, sector_count, buffer);
 }
 
+fn write(lba: u64, sector_count: u16, buffer: []u16) !void {
+    std.debug.assert((sector_count << 8) == buffer.len); // 512 bytes per sector
+
+    // Select master drive with LBA bit set
+    io.out(ATA_REG_HDDEVSEL, 0xE0);
+    ata_delay();
+
+    // Write high bytes first (LBA48 protocol)
+    io.out(ATA_REG_SECCOUNT0, @as(u8, sector_count >> 8));
+    io.out(ATA_REG_LBA0, @as(u8, lba >> 24));
+    io.out(ATA_REG_LBA1, @as(u8, lba >> 32));
+    io.out(ATA_REG_LBA2, @as(u8, lba >> 40));
+
+    // Then write low bytes
+    io.out(ATA_REG_SECCOUNT0, @as(u8, sector_count));
+    io.out(ATA_REG_LBA0, @as(u8, lba >> 0));
+    io.out(ATA_REG_LBA1, @as(u8, lba >> 8));
+    io.out(ATA_REG_LBA2, @as(u8, lba >> 16));
+
+    // Send write command
+    io.out(ATA_REG_COMMAND, ATA_CMD_WRITE_PIO_EXT); // 0x34
+
+    ata_wait_busy();
+    ata_wait_drq();
+
+    // Write data: 256 words (512 bytes) per sector
+    for (buffer) |word| {
+        io.out(ATA_REG_DATA, word);
+    }
+
+    ata_wait_busy();
+
+    // Flush cache to ensure data hits disk
+    io.out(ATA_REG_COMMAND, ATA_CMD_CACHE_FLUSH_EXT); // 0xEA
+    ata_wait_busy();
+}
+
+
 var capacity:u32 = 0; // in sectors
 pub fn init() void {
     // 1. Select primary master (0xA0 = master, 0xB0 = slave)
@@ -134,10 +177,10 @@ pub fn init() void {
     //test
     //var buf2 = [_]u16{0} ** 2048;
     //read(6680, 8, &buf2) catch unreachable;
-    read(2056, 1, &buf) catch unreachable;
-    read(2056, 1, &buf) catch unreachable;
-    read(2056, 1, &buf) catch unreachable;
-    read(2056, 1, &buf) catch unreachable;
+    //read(2056, 1, &buf) catch unreachable;
+    //read(2056, 1, &buf) catch unreachable;
+    //read(2056, 1, &buf) catch unreachable;
+    //read(2056, 1, &buf) catch unreachable;
 }
 var parts:[4]blk.BlockDevice = undefined;
 

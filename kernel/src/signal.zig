@@ -218,7 +218,7 @@ pub export fn sysRtSigReturn() callconv(std.builtin.CallingConvention.SysV) i64 
     regs.rip  =   sigframe.context.ip; 
     regs.syscall_no = -1;
 
-    return @intCast(regs.rax);
+    return @bitCast(regs.rax);
 }
 
 pub export fn sysRtSigAction(s:i32, act:?*SigAction, oact:?*SigAction, 

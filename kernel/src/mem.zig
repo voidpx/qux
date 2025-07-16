@@ -188,11 +188,14 @@ fn handlePageFault(state: *idt.IntState) void {
 
     const t = task.getCurrentTask();
     const mm = t.mem;
+    if (cr2 == 0) {
+        std.debug.panic("trying to derefence null pointer\n", .{});
+    }
     const v = mm.mmap(cr2, page_size, task.Mem.MAP_NOFT) catch |err| {
         console.print("error handling page fault, {any}\n", .{err});
         std.debug.panic("unable to handle page fault", .{});
     }; 
-    console.print("page fault handled, {any}\n", .{v});
+    console.print("page fault handled at, 0x{x}\n", .{v.start});
 }
 
 pub fn mapUserVm(pgd:*PageTable, start:u64, end:u64) !void {

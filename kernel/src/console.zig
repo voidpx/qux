@@ -187,6 +187,8 @@ pub fn log(comptime template: []const u8, arg: anytype) void {
 pub fn print(comptime template: []const u8, arg: anytype) void {
     const v = lock.cli();
     defer lock.sti(v);
+    //const pid = task.getCurrentTask().id;
+    //_ = std.fmt.format(writer, "process: {} => ", .{pid}) catch unreachable;
     _ = std.fmt.format(writer, template, arg) catch unreachable;
 }
 

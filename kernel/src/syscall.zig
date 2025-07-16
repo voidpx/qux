@@ -52,7 +52,16 @@ const sig = @import("signal.zig");
 /// interrupt/syscall exit call
 pub export fn exit_call(state: *idt.IntState) callconv(std.builtin.CallingConvention.SysV) void {
     const regs = task.getCurrentState();
+    const t = task.getCurrentTask();
+    if (t.id == 0) return;
     if (regs != state) { // syscall/isr interrupted, don't handle signal
+        //if (regs.syscall_no >= 0) {
+        //    const sc:SysCallNo = @enumFromInt(regs.syscall_no);
+        //    console.print("syscall {} interrupted\n", .{sc});
+        //} else {
+        //    const ex = regs.vector;
+        //    console.print("exception/interrupt 0x{x} interrupted\n", .{ex});
+        //}
         return;
     }
     // handle signal here
@@ -61,7 +70,7 @@ pub export fn exit_call(state: *idt.IntState) callconv(std.builtin.CallingConven
 
 export fn syscall(state: *idt.IntState, no: u64) callconv(std.builtin.CallingConvention.SysV) void {
     //console.print("state: {any}\n", .{state});
-    //console.print("syscall: {}\n", .{@as(SysCallNo, @enumFromInt(no))});
+    //console.print("syscall: {}, task: {}\n", .{@as(SysCallNo, @enumFromInt(no)), task.getCurrentTask().id});
     const f = syscall_tb[no] orelse std.debug.panic("syscall not implemented: {}\n", .{no}); 
     const ret = asm volatile (
         \\

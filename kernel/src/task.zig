@@ -807,6 +807,11 @@ export fn finishTaskSwitch(
 
 extern fn __switchTask(cur:*Task, to:*Task, cur_sp:*u64, next_sp:*u64) void;
 
+export fn newTaskExitCall(state: *idt.IntState) callconv(std.builtin.CallingConvention.SysV) void {
+    _=&state;
+    return;
+}
+
 const as = @import("asm.zig");
 comptime {
     asm (
@@ -822,7 +827,7 @@ comptime {
     \\  mov %rbx, %rdi //fn
     \\  mov $1, %rdx
     \\  call finishTaskSwitch
-    \\entry_call_return exit_call
+    \\entry_call_return newTaskExitCall
     \\  
     \\__switchTask:
     \\ push %r15
@@ -984,6 +989,7 @@ fn setupTask(a:*const CloneArgs, task:*Task, cur:*Task) !void {
     task.name_len = last;
     const fp = task.stack + task_stack_size - @sizeOf(NewTaskFrame);
     var frame:*NewTaskFrame = @ptrFromInt(fp);
+    // TODO: init frame with 0s
     frame.ret_addr = @intFromPtr(&newTaskEntry);
     task.pid = cur.pid;
     if (a.func) |f| { // kernel thread
