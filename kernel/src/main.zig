@@ -58,7 +58,8 @@ export fn startKernel(b: *bi.BootInfo) callconv(std.builtin.CallingConvention.Sy
     
     kthread.createUserThread("init", &initThread, null);
 
-    //task.startSchedRoutine();
+    kthread.createKThread("timer", &time.timerRoutine, null);
+    task.startSchedRoutine();
 
     //XXX: debug mem
     //kthread.createKThread("mem-watch", &printMemStat, null);
@@ -130,8 +131,8 @@ fn initThread(_:?*anyopaque) u16 {
     //time.sleep(.{.sec = 3});
 
     //testSched();
+    // XXX: don't create sub processes here
 
-    //kthread.createKThread("reaper", &reaper, null);
     return runShell(null);
     //kthread.createUserThread("init", &runShell, null);
 

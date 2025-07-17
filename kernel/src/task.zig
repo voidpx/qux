@@ -778,7 +778,6 @@ fn scheduleEnter(_:*Task) bool {
 }
 fn scheduleExit(t:*Task) void {
     t.state = .running;
-    t.cpuEnter();
     enablePreempt();
     lock.sti(switch_cli);
 }
@@ -794,6 +793,7 @@ export fn finishTaskSwitch(
     if (new) {
         switch_cli = true;
     }
+    t.cpuEnter();
     scheduleExit(t);
     if (new) {
         if (func) |f| { // kernel thread
@@ -929,6 +929,16 @@ fn wakeupTaskUnlocked(t:*Task) void {
     }
 }
 
+pub fn wait(wq: *WaitQueue) void {
+    const l = lock.cli();
+    defer lock.sti(l);
+    const t = getCurrentTask();
+    t.state = .blocked;
+    var node = WaitQueue.Node{.data = t};
+    wq.append(&node);
+    scheduleWithIF();
+}
+
 pub fn wakeup(wq:*WaitQueue) void {
     const v = lock.cli();
     defer lock.sti(v);
@@ -954,6 +964,7 @@ pub fn schedule() void {
         scheduleExit(t);
         return;
     }
+    cur.cpuExit();
     switch_cli = cli;
     switchTask(cur, t);
 }

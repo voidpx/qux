@@ -7,6 +7,41 @@ const idt = @import("idt.zig");
 const std = @import("std");
 const task = @import("task.zig");
 
+pub const EPERM	= 1;
+pub const ENOENT	= 2;
+pub const ESRCH	= 3;
+pub const EINTR	= 4;
+pub const EIO	= 5;	
+pub const ENXIO	= 6;
+pub const E2BIG	= 7;
+pub const ENOEXEC	= 8;
+pub const EBADF	= 9;
+pub const ECHILD	=10;
+pub const EAGAIN	=11;
+pub const ENOMEM	=12;
+pub const EACCES	=13;
+pub const EFAULT	=14;
+pub const ENOTBLK	=15;
+pub const EBUSY	=16;
+pub const EEXIST	=17;
+pub const EXDEV	=18;
+pub const ENODEV	=19;
+pub const ENOTDIR	=20;
+pub const EISDIR	=21;
+pub const EINVAL	=22;
+pub const ENFILE	=23;
+pub const EMFILE	=24;
+pub const ENOTTY	=25;
+pub const ETXTBSY	=26;
+pub const EFBIG	=27;
+pub const ENOSPC	=28;
+pub const ESPIPE	=29;
+pub const EROFS	=30;
+pub const EMLINK	=31;
+pub const EPIPE	=32;
+pub const EDOM	=33;
+pub const ERANGE	=34;
+
 pub const File = struct { fd: u32 };
 
 pub fn open(filename: [*:0]u8, f: u32, mode: u16) u64 {
@@ -51,9 +86,12 @@ comptime {
 const sig = @import("signal.zig");
 /// interrupt/syscall exit call
 pub export fn exit_call(state: *idt.IntState) callconv(std.builtin.CallingConvention.SysV) void {
-    const regs = task.getCurrentState();
     const t = task.getCurrentTask();
+    if (t.needResched()) {
+        task.schedule();
+    }    // handle signal here
     if (t.id == 0) return;
+    const regs = task.getCurrentState();
     if (regs != state) { // syscall/isr interrupted, don't handle signal
         //if (regs.syscall_no >= 0) {
         //    const sc:SysCallNo = @enumFromInt(regs.syscall_no);
@@ -64,7 +102,6 @@ pub export fn exit_call(state: *idt.IntState) callconv(std.builtin.CallingConven
         //}
         return;
     }
-    // handle signal here
     sig.handleSignals(task.getCurrentTask());
 }
 

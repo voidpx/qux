@@ -23,13 +23,22 @@ pub fn pit_init() void {
 }
 
 const time = @import("time.zig");
-fn pit_interrupt() void {
+const mem = @import("mem.zig");
+const lock = @import("lock.zig");
+fn pit_interrupt(state:*idt.IntState) void {
+    const l = lock.cli();
+    defer lock.sti(l);
     ticks += 1;
-    @import("time.zig").runTimers();
-    if (!task.preemptDisabled()) {
+    _=&state; 
+    //if (state.rip < mem.user_max) {
+        // userspace interrupted
         const cur = task.getCurrentTask();
-        cur.resched();
-    }
+        @import("time.zig").runTimers();
+        if (!task.preemptDisabled() and time.getTime().getAsMilliSeconds() - cur.sched.cpu_enter > 100) {
+            cur.resched();
+        }
+
+    //}
 
     //console.print("pit timer interrupt, ticks: {}\n", .{ticks});    
 }

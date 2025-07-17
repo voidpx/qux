@@ -2,6 +2,7 @@ const std = @import("std");
 const task = @import("task.zig");
 pub const Timer = struct {
     ctx: ?*anyopaque = null,
+    on_list :?*anyopaque = null,
     node: TimerList.Node = .{.prev = null, .next = null, .data = undefined}, // private
     next_fire:i64 = 0, // in milli seconds
     repeat:i64 = 0, // in milli seconds
@@ -66,6 +67,7 @@ fn wakeUp(t:*Timer) void {
 fn onExit(ctx:?*anyopaque, _:*task.Task) void {
     const timer:*Timer = @ptrCast(@alignCast(ctx));
     removeTimer(timer);
+    removeFromExpired(timer);
 }
 
 const console = @import("console.zig");
@@ -125,10 +127,6 @@ pub fn init() void {
     syscall.registerSysCall(syscall.SysCallNo.sys_clock_gettime, &sysClockGetTime);
 }
 
-var expired_timers:TimerList = .{};
-
-
-
 pub export fn sysClockGetTime(clock_id:i32, ret:*Time) callconv(std.builtin.CallingConvention.SysV) i64 {
     _=&clock_id;
     const t =getTime();   
@@ -150,41 +148,86 @@ fn getBootTime() u64 {
     return pit.getTicks() * nsec_per_tick;
 }
 
+var expired_timers = TimerList{};
+fn nextExpired() ?*Timer {
+    const l = lock.cli();
+    defer lock.sti(l);
+    const n = expired_timers.popFirst() orelse return null;
+    n.data.on_list = null;
+    return n.data;
+}
+pub fn timerRoutine(_:?*anyopaque) u16 {
+    while (true) {
+        const now = getTime().getAsMilliSeconds();
+        while (nextExpired()) |t| {
+            t.func(t);
+            if (t.repeat > 0) {
+                t.next_fire = now + t.repeat;
+                addTimer(t);
+            }
+        }
+        task.wait(&exp_timer_wq);
+    }
+}
+
+var exp_timer_wq = task.WaitQueue{};
+fn addToExpired(t:*Timer) void {
+    const l = lock.cli();
+    defer lock.sti(l);
+    t.on_list = &expired_timers;
+    expired_timers.append(&t.node);
+}
+
 pub fn runTimers() void {
+    const l = lock.cli();
+    defer lock.sti(l);
     var node = timers.first;
     const now = getTime().getAsMilliSeconds();
     while (node) |n| {
-        var t = n.data;
-        if (t.next_fire <= now) {
-            t.func(t);
-            if (t.repeat == 0) {
-                removeTimer(t);
-            } else {
-                t.next_fire = now + t.repeat;
-            }
-        }
+        const t = n.data;
         node = n.next;
+        if (t.next_fire <= now) {
+            removeTimer(t);
+            addToExpired(t); 
+        }
+    }
+    if (expired_timers.len > 0) {
+        task.wakeup(&exp_timer_wq);
     }
 }
 
 const lock = @import("lock.zig");
 pub fn addTimer(timer: *Timer) void {
+    const v = lock.cli();
+    defer lock.sti(v);
     timer.node.data = timer;
     timer.node.prev = null;
     timer.node.next = null;
-    const v = lock.cli();
-    defer lock.sti(v);
+    timer.on_list = &timers;
     timers.append(&timer.node);
 }
 
 pub fn removeTimer(timer: *Timer) void {
     const v = lock.cli();
     defer lock.sti(v);
-    if (timer.node.prev != null or timer.node.next != null) {
+    if (timer.on_list == @as(*anyopaque, @ptrCast(&timers))) {
         timers.remove(&timer.node);
         timer.node.prev = null;
         timer.node.next = null;
+        timer.on_list = null;
     }
+
+}
+fn removeFromExpired(timer: *Timer) void {
+    const v = lock.cli();
+    defer lock.sti(v);
+    if (timer.on_list == @as(*anyopaque, @ptrCast(&expired_timers))) {
+        expired_timers.remove(&timer.node);
+        timer.node.prev = null;
+        timer.node.next = null;
+        timer.on_list = null;
+    }
+
 }
 
 fn makeTime(t: rtc.RTC) Time {

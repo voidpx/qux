@@ -46,7 +46,10 @@ pub fn init() void {
 
 pub export fn sysExecve(file: [*:0]const u8, argv:?[*:null]?[*:0]const u8,
     envp:?[*:null]?[*:0]const u8) callconv(std.builtin.CallingConvention.SysV) i64 {
-    exec(file, argv, envp) catch return -1;
+    exec(file, argv, envp) catch |err| {
+        if (err == error.FileNotFound) return syscall.ENOENT;
+        return -1;
+    };
     return 0;
 
 }
@@ -96,19 +99,16 @@ fn copyArgsAndEnv(dst:*[mem.page_size]u8, dst_ptr:*[mem.page_size/@sizeOf(u64)]u
 pub fn exec(file: [*:0]const u8, args:?[*:null]?[*:0]const u8, env:?[*:null]?[*:0]const u8) !void {
     const l = lock.cli();
     defer lock.sti(l);
-    var st:fs.Stat = std.mem.zeroInit(fs.Stat, .{});
-    if (fs.sysStat(file, &st) < 0) {
-        console.print("error exec/stat\n", .{});
-        return error.ErrorStatFile;
+    const f = try fs.open(file, 0);
+    defer f.put();
+    if (f.getType() != .FILE) {
+        return error.NotExecutable;
     }
-    const f = fs.sysOpen(file, 0, 0);
-    if (f == -1) return error.ErrorOpeningFile;
-    defer _=fs.sysClose(f);
     
-    const buffer = try mem.allocator.alloc(u8, @intCast(st.st_size));
+    const buffer = try mem.allocator.alloc(u8, @intCast(f.size));
     defer mem.allocator.free(buffer);
 
-    if (fs.sysRead(@intCast(f), buffer.ptr, buffer.len) != buffer.len) {
+    if (try fs.read(f, buffer) != buffer.len) {
         return io.IOError.ReadError; 
     }
     

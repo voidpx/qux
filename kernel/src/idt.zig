@@ -121,7 +121,6 @@ const k_end = @extern(*const u8, .{ .name = "_etext" });
 const task = @import("task.zig");
 const time = @import("time.zig");
 export fn handle_interrupt(state: *IntState, vec: u64) callconv(std.builtin.CallingConvention.SysV) void {
-    const cur = task.getCurrentTask();
     //if (state.rsp < cur.stack + 128) {
     //    std.debug.panic("stackoverflow\n", .{});
     //}
@@ -148,16 +147,8 @@ export fn handle_interrupt(state: *IntState, vec: u64) callconv(std.builtin.Call
         else => handleHwInterrupt(state, vec - 0x20)
     }
 
-    cur.cpuExit();
-
     if (vec == 0xd) {
         console.print("GP\n", .{});
-    }
-    if (cur.needResched()) {
-        task.schedule();
-    } else {
-        cur.cpuEnter();
-        //console.print("no sched\n", .{});
     }
     // NOTE: console print is not safe in interrupt context
     // console.print("exception: {}\n", .{vec});
@@ -194,7 +185,7 @@ fn handleHwInterrupt(state: *IntState, irq:u64) void {
     _=&state;
     const handler = handlers[irq];
     if (handler) |h| {
-        h.handler();
+        h.handler(state);
         pic.sendEOI(@intCast(irq));
     } else {
         console.print("unhandled interrupt: 0x{x}\n", .{irq}); 
@@ -229,13 +220,13 @@ pub fn init() void {
 }
 
 const IrqHandler = struct {
-    handler: *const fn() void,
+    handler: *const fn(*IntState) void,
     next: ?*IrqHandler = null
 };
 const MAX_INT = 16;
 var handlers = [_]?IrqHandler{null} ** MAX_INT;
 
-pub fn registerIrq(irq: u8, h: *const fn() void) void {
+pub fn registerIrq(irq: u8, h: *const fn(*IntState) void) void {
     handlers[irq] = IrqHandler{.handler = h};
 }
 

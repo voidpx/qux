@@ -98,6 +98,7 @@ fn dupDirEntry(d:*fs.DirEntry) !*fs.DirEntry {
     const dp:*DirEntObj = @alignCast(@ptrCast(d.priv));
     const dd = try allocator.create(fs.DirEntry);
     dd.name = dp.name;
+    dd.type = d.type;
     dd.priv = obj.get(dp);
     dd.prev = null;
     dd.next = null;
@@ -253,6 +254,7 @@ pub fn init() void {
     const root_dobj = DirEntObj.new(rd) catch unreachable;
     const root_dent = allocator.create(fs.DirEntry) catch unreachable;
     root_dent.name = root_dobj.name;
+    root_dent.type = .DIR;
     root_dent.priv = root_dobj;
     root_dent.prev = null;
     root_dent.next = null;
@@ -440,6 +442,17 @@ fn readINode(inode_num: u32) !INode {
     return inode;
 }
 
+const EntType = enum(u8) {
+    EXT2_FT_UNKNOWN	   = 0,
+    EXT2_FT_REG_FILE   = 1,
+    EXT2_FT_DIR	   = 2,
+    EXT2_FT_CHRDEV	   = 3,
+    EXT2_FT_BLKDEV	   = 4,
+    EXT2_FT_FIFO	   = 5,
+    EXT2_FT_SOCK	   = 6,
+    EXT2_FT_SYMLINK    = 7,
+};
+
 fn getDirEnt(inode:*const INode, ent_name:[]const u8) !*fs.DirEntry {
     var buf = try allocator.alloc(u8, block_size);
     defer allocator.free(buf);
@@ -468,6 +481,11 @@ fn getDirEnt(inode:*const INode, ent_name:[]const u8) !*fs.DirEntry {
                     return err;
                 };
                 r.name = pd.name;
+                switch (entry.file_type) {
+                    @intFromEnum(EntType.EXT2_FT_DIR) => r.type = .DIR,
+                    @intFromEnum(EntType.EXT2_FT_SYMLINK) => r.type = .LINK,
+                    else => r.type = .FILE,
+                }
                 r.priv = pd;
                 return r;
             }

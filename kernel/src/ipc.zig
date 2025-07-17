@@ -6,6 +6,7 @@ const lock = @import("lock.zig");
 const task = @import("task.zig");
 pub fn init() void {
     syscall.registerSysCall(syscall.SysCallNo.sys_pipe2, &sysPipe2);
+    syscall.registerSysCall(syscall.SysCallNo.sys_pipe, &sysPipe);
 }
 
 const pipe_fops:fs.FileOps = .{
@@ -18,8 +19,11 @@ const pipe_fs_ops:fs.FsOp = .{
     .stat = undefined,
     .lookup = undefined,
     .copy_path = undefined,
-    .free_path = undefined
+    .free_path = &dummpyFreePath
 };
+
+fn dummpyFreePath(_:*fs.MountedFs, _:fs.Path) void {
+}
 
 const obj = @import("object.zig");
 const Pipe = struct {
@@ -28,43 +32,45 @@ const Pipe = struct {
     w_wq:task.WaitQueue,
     rf:?*fs.File,
     wf:?*fs.File,
-    fn new() !*Pipe {
-        const p = try mem.allocator.create(Pipe);
-        p.buf =  std.RingBuffer.init(mem.allocator, mem.page_size) catch {
-            mem.allocator.destroy(p);
-            return error.OutOfMemory;
-        }; 
+    closed:bool = false,
+    fn ctor(p:*Pipe) !void {
+        p.buf =  try std.RingBuffer.init(mem.allocator, mem.page_size);
         p.r_wq = .{};
         p.w_wq = .{};
+    }
+    fn new() !*Pipe {
+        const p = try obj.new(Pipe, &ctor, &drop);
         return p;
+    }
+
+    fn close(p:*Pipe) void {
+        p.closed = true;
+        task.wakeup(&p.r_wq);
+        task.wakeup(&p.w_wq);
     }
 
     fn drop(p:*Pipe) void {
         p.buf.deinit(mem.allocator);
-        mem.allocator.destroy(p);
     }
 };
 
 fn finalize(file:*fs.File) anyerror!void {
     const l = lock.cli();
     defer lock.sti(l);
+    if (file.ctx == null) return;
     const p:*Pipe = @alignCast(@ptrCast(file.ctx));
-    const rf = p.rf.?;
-    const wf = p.wf.?;
-    if (file == rf) {
-        wf.put();
-    } else if (file == wf) {
-        rf.put();
-    }
-    p.drop();
+    p.close();
+    obj.put(p);
 }
 
 fn write(file:*fs.File, buf:[]const u8) anyerror!usize {
     const l = lock.cli();
     defer lock.sti(l);
     const p:*Pipe = @alignCast(@ptrCast(file.ctx));
+    _=obj.get(p) orelse return error.InvalidPipe;
+    defer obj.put(p);
     const rb:*std.RingBuffer = &p.buf;
-    while (rb.isFull()) {
+    while (!p.closed and rb.isFull()) {
         const t = task.getCurrentTask();
         var wq = &p.w_wq;
         var node:task.WaitQueue.Node = .{.data = t};
@@ -74,20 +80,25 @@ fn write(file:*fs.File, buf:[]const u8) anyerror!usize {
         task.schedule();
         _=lock.cli();
     }
-    const len = rb.data.len - rb.len();
-    const wl = @min(buf.len, len);
-    const rl = buf.len - wl;
-    try rb.writeSlice(buf[0..wl]);
-    task.wakeup(&p.r_wq);
-    return rl;
+    if (!p.closed) {
+        const len = rb.data.len - rb.len();
+        const wl = @min(buf.len, len);
+        const rl = buf.len - wl;
+        try rb.writeSlice(buf[0..wl]);
+        task.wakeup(&p.r_wq);
+        return rl;
+    }
+    return error.ClosedPipe;
 }
 
 fn read(file:*fs.File, buf:[]u8) anyerror![]u8 {
     const l = lock.cli();
     defer lock.sti(l);
     const p:*Pipe = @alignCast(@ptrCast(file.ctx));
+    _=obj.get(p) orelse return error.InvalidPipe;
+    defer obj.put(p);
     const rb:*std.RingBuffer = &p.buf;
-    while (rb.isEmpty()) {
+    while (!p.closed and rb.isEmpty()) {
         const t = task.getCurrentTask();
         var wq = &p.r_wq;
         var node:task.WaitQueue.Node = .{.data = t};
@@ -97,10 +108,14 @@ fn read(file:*fs.File, buf:[]u8) anyerror![]u8 {
         task.schedule();
         _=lock.cli();
     }
-    const len = @min(buf.len, rb.len());
-    try rb.readFirst(buf, len);
-    task.wakeup(&p.w_wq);
-    return buf[0..len];
+    
+    if (!p.closed) {
+        const len = @min(buf.len, rb.len());
+        try rb.readFirst(buf, len);
+        task.wakeup(&p.w_wq);
+        return buf[0..len];
+    }
+    return error.ClosedPipe;
 }
 
 const pipe_fs:fs.MountedFs = .{
@@ -110,22 +125,27 @@ const pipe_fs:fs.MountedFs = .{
     .fops = &pipe_fops
 };
 
+pub export fn sysPipe(fds:*[2]u32, _:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    return sysPipe2(fds, 0);
+}
+
 pub export fn sysPipe2(fds:*[2]u32, flags:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
     const t = task.getCurrentTask();
     const rfd = t.fs.getFreeFd() catch return -1;
     const wfd = t.fs.getFreeFd() catch return -1;
     const pipe = Pipe.new() catch return -1;
     
-    const rf = fs.File.get_new(fs.Path{.fs = undefined, .entry = undefined}, &pipe_fops) catch {
-        pipe.drop();
+    const rf = fs.File.get_new(fs.Path{.fs = @constCast(&pipe_fs), .entry = undefined}, &pipe_fops) catch {
+        obj.put(pipe);
         return -1;
     };
     rf.ctx = pipe;
-    const wf = fs.File.get_new(fs.Path{.fs = undefined, .entry = undefined}, &pipe_fops) catch {
-        pipe.drop();
+    const wf = fs.File.get_new(fs.Path{.fs = @constCast(&pipe_fs), .entry = undefined}, &pipe_fops) catch {
+        obj.put(pipe);
         rf.put();
         return -1;
     };
+    wf.ctx = obj.get(pipe);
     pipe.rf = rf;
     pipe.wf = wf;
     t.fs.installFd(rfd, rf);

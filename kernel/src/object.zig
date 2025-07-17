@@ -21,12 +21,15 @@ const Object = struct {
     }
 };
 
-pub fn new(comptime T:type, ctor:?*const fn(*T) void, dtor:?*const fn(*T) void) !*T {
+pub fn new(comptime T:type, ctor:?*const fn(*T) anyerror!void, dtor:?*const fn(*T) void) !*T {
     const t = getObjType(T);
     const o = try alloc.create(t);
     o.__obj_base = .{.ref_count = Count.init(1), .dtor = @ptrCast(dtor)};
     if (ctor) |c| {
-        c(&o.object);
+        c(&o.object) catch |err| {
+            alloc.destroy(o);
+            return err;
+        };
     }
     return &o.object; 
 }
