@@ -120,15 +120,6 @@ fn copyPath(mfs:*fs.MountedFs, path:fs.Path) anyerror!fs.Path {
     return p;
 }
 
-fn readNodeBlock(n:*const INode, block_index:u64) ![*]u32 {
-    const buf = try allocator.alloc(u8, block_size);
-    const block_num = n.block[block_index];
-    if (block_num == 0) return error.CorruptedFileSys;
-    const block_offset = block_num * block_size;
-    if (try bdev.read(block_offset, buf) != buf.len) return error.CorruptedFileSys;
-    return @as([*]u32, @ptrCast(buf.ptr));
-}
-
 const bc = @import("../bcache.zig");
 
 fn getBlockNumRange(n:*const INode, sbi:u64, ebi:u64, bkn:[]u64) !void {

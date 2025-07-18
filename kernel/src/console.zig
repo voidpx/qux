@@ -259,6 +259,9 @@ fn consoleInput(char:u32) void {
         _=writer.write(&ba) catch unreachable;
     } else {
         if (!input_buf.isFull()) {
+            if (input_wq.len == 0) { // no one is waiting for input
+                return;
+            }
             input_buf.write(@truncate(c)) catch unreachable;
             const ba = [_]u8{@truncate(c)};
             _=writer.write(&ba) catch unreachable;
