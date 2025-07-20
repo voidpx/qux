@@ -204,8 +204,6 @@ const FbCon = struct {
         
     }
     fn write(self:*@This(), char:u32) !void {
-        self.cursor(false);
-        defer self.cursor(true);
         self.scrollDownToLastLine();
         if (char == '\n') {
             _ = try self.appendLine();

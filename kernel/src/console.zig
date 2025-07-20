@@ -6,7 +6,6 @@ pub const Con = struct {
     cursor: *const fn(self:*@This(), on:bool) void,
     scroll_up: *const fn(self:*@This()) void,
     scroll_down: *const fn(self:*@This()) void
-
 };
 
 pub var con:?*Con = null;
@@ -171,7 +170,7 @@ const RingBufferIter = struct {
 };
 
 const console_err = error{ConsoleError};
-pub const writer = std.io.Writer(void, console_err, consoleWrite){ .context = {} };
+pub const writer = std.io.Writer(void, anyerror, consoleWrite){ .context = {} };
 const lock = @import("lock.zig");
 pub fn log(comptime template: []const u8, arg: anytype) void {
     const v = lock.cli();
@@ -192,11 +191,32 @@ pub fn print(comptime template: []const u8, arg: anytype) void {
     _ = std.fmt.format(writer, template, arg) catch unreachable;
 }
 
-fn consoleWrite(_: void, bytes: []const u8) console_err!usize {
+fn showCursor() bool {
+    return input_wq.len > 0;
+}
+
+// can't call switchCursor in wrietToConsole somehow, seems it causes
+// the compile to reorder some assembly and make some assembly macro to be used before it's defined
+var switch_cursor:?*const fn(c:*Con, on:bool) void = null;
+
+fn switchCursor(c:*Con, on:bool) void {
+    if (input_wq.len > 0) {
+        c.cursor(c, on);
+    }
+}
+
+fn writeToConsole(c:*Con, bytes:[]const u8) !usize {
+    if (switch_cursor) |f| f(c, false);
+    for (bytes) |b| {
+        try c.write(c, b);
+    }
+    if (switch_cursor) |f| f(c, true);
+    return bytes.len;
+}
+
+fn consoleWrite(_: void, bytes: []const u8) !usize {
     if (con) |c| {
-        for (bytes) |b| {
-            c.write(c, b) catch  return console_err.ConsoleError;
-        }
+        return try writeToConsole(c, bytes);
     } else {
         for (bytes) |b| {
             console_buf.write(b);
@@ -211,6 +231,7 @@ var time_call:?*const fn() u64 = null;
 // called after timer is up
 pub fn timeReady(get_time: *const fn() u64) void {
     time_call = get_time;
+    switch_cursor = &switchCursor;
     cursor = time.Timer{.repeat = 700,.ctx = @ptrFromInt(1), .func = &toggleCursor};
     cursor.node.data = &cursor;
     time.addTimer(&cursor);
@@ -230,6 +251,13 @@ fn toggleCursor(t: *time.Timer) void {
     const v = lock.cli();
     defer lock.sti(v);
     const state = @intFromPtr(t.ctx.?);
+    if (input_wq.len == 0) {
+        if (state == 2) {
+            con.?.cursor(con.?, false);
+            t.ctx = @ptrFromInt(1);
+        }
+        return;
+    }
     switch (state) {
         1 => {con.?.cursor(con.?, true); t.repeat = 700; t.ctx = @ptrFromInt(2);},
         2 => {con.?.cursor(con.?, false); t.repeat = 300; t.ctx = @ptrFromInt(1);},
