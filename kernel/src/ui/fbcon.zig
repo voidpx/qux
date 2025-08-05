@@ -280,6 +280,7 @@ const fbfs:fs.MountedFs = .{.ctx = null,
 
 const fbfsops:fs.FsOp = .{
     .lookup = undefined,
+    .lookupAt = undefined,
     .copy_path = undefined,
     .free_path = undefined,
     .stat = undefined

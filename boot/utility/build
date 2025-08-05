@@ -1,4 +1,6 @@
 #!/bin/bash
 
-zig build-exe -mcpu=x86_64-sse-sse2+soft_float test.zig
+zig build-exe -mcpu=x86_64-sse-sse2+soft_float s1s.zig
+
+zig build-exe -mcpu=x86_64-sse-sse2+soft_float hello.zig
 

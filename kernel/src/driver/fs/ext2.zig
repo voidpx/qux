@@ -24,6 +24,7 @@ var bdev:*blk.BlockDevice = undefined;
 var ext2fs:fs.MountedFs = undefined;
 const ext2fs_ops = fs.FsOp {
     .lookup = &lookup,
+    .lookupAt = &lookupAt,
     .copy_path = &copyPath,
     .free_path = &freePath,
     .stat = &stat,
@@ -31,6 +32,7 @@ const ext2fs_ops = fs.FsOp {
 const ext2fs_fops = fs.FileOps {
     .read = &read,
     .write = &write,
+    .readdir = &readdir,
 };
 
 fn stat(_:*fs.MountedFs, path:fs.Path, s:*fs.Stat) anyerror!i64 {
@@ -47,8 +49,24 @@ fn stat(_:*fs.MountedFs, path:fs.Path, s:*fs.Stat) anyerror!i64 {
     s.st_gid = no.gid;
     s.st_mode = no.mode;
     s.st_blocks = no.blocks;
+    s.st_dev = 0;
+    s.st_nlink = no.links_count;
+    s.st_blksize = block_size;
     
     return 0;
+}
+
+fn readdir(file:*fs.File, d:*fs.DEntry, len:u64) !i64 {
+    const dp:*DirEntObj = @alignCast(@ptrCast(file.path.entry.priv));  
+    const inode = try readINode(dp.dentry.inode);
+    const sz = try readDirEntries(&inode, &file.pos, d, len);
+    return sz;
+}
+
+fn lookupAt(_:*fs.MountedFs, dir:fs.Path, name:[]const u8, flags:u32) anyerror!fs.Path {
+    var d = try dir.copy();
+    const e = try lookupDEntry(d.entry, name, flags);
+    return d.append(e).*;
 }
 
 fn lookup(mfs:*fs.MountedFs, path:[]const u8, flags:u32) anyerror!fs.Path {
@@ -75,14 +93,29 @@ fn lookup(mfs:*fs.MountedFs, path:[]const u8, flags:u32) anyerror!fs.Path {
 }
 
 fn lookupDEntry(d:*fs.DirEntry, name:[]const u8, flags:u32) !*fs.DirEntry {
+    _=flags;
+    var n = name;
+    if (name.len == 0)
+        return error.EmptyFileName;
+    if (name[name.len - 1] == '/') { // trailing slash
+        n = name[0..name.len - 1]; 
+    }
+    if (std.mem.startsWith(u8, name, "./")) {
+        n = name[2..];
+    }
     const dir:*DirEntObj = @alignCast(@ptrCast(d.priv));
     const inode = try readINode(dir.dentry.inode);
     if (!inode.isDir()) {
         return error.FileNotFound;
     }
-    
-    _=flags;
-    return try getDirEnt(&inode, name);
+    if (std.mem.eql(u8, n, ".")) return dupDirEntry(d);
+    if (std.mem.eql(u8, n, "..")) {
+        if (d.prev) |p| {
+            return dupDirEntry(p);
+        }
+        return dupDirEntry(d);
+    }
+    return try getDirEnt(&inode, n);
 }
 
 fn freePath(_:*fs.MountedFs, path:fs.Path) void {
@@ -210,8 +243,8 @@ fn read(file:*fs.File, buf:[]u8) ![]u8 {
             len-=offset;
         }
         if (i == bkn.len - 1) {
-            const rem = (file.pos + rsz) % block_size;
-            len -= (block_size - rem);
+            const rem = eblk * block_size - (file.pos + rsz);
+            len -=  rem;
         }
         const readn = try bdev.read(bn * block_size + offset, buf[si..si+len]);
         if (readn != len) return error.CorruptedFileSys;
@@ -486,48 +519,63 @@ fn getDirEnt(inode:*const INode, ent_name:[]const u8) !*fs.DirEntry {
 }
 
 const allocator = @import("../../mem.zig").allocator;
-fn listDir(inode: *const INode, ident:u32) !void {
+fn readDirEntries(inode: *const INode, poff:*u64, d:*fs.DEntry, len:u64) !i64 {
+    const off = poff.*;
+    if (off >= inode.size) return 0;
     var buf = try allocator.alloc(u8, block_size);
     defer allocator.free(buf);
 
-    var ds = try allocator.alloc(u8, ident);
-    defer allocator.free(ds);
-    for (0..ident) |i| {
-        ds[i] = ' ';
-    }
+    const end = @min(inode.size, off + len);
+    const eblk = (end + block_size - 1)/block_size;
+
+    const sblk = off / block_size;
+    const blk_off = off % block_size;
+
+    const bkn = try allocator.alloc(u64, eblk - sblk);
+    defer allocator.free(bkn);
+    try getBlockNumRange(inode, sblk, eblk, bkn);
+
     var i:usize = 0;
-    while (true) {
-        defer i+=1;
-        if (i >= 12) {
-            console.print("indirect blocks are not supported yet\n", .{});
-            break;
-        }
-        const block_num = inode.block[i];
-        if (block_num == 0) break;
-        const block_offset = block_num * block_size;
-        _ = try bdev.read(block_offset, buf);
-        var pos: usize = 0;
+    var dp:*fs.DEntry = d;
+    const dend:[*]u8 = @as([*]u8, @ptrCast(dp)) + len;
+    var ret:i64 = 0;
+    const p_len = @offsetOf(fs.DEntry, "d_name");
+    var r_off:u64 = 0;
+    outer:for (sblk..eblk) |bi| {
+        defer i += 1;
+        const b = bkn[i];
+        const rlen = try bdev.read(b * block_size, buf);
+        if (rlen != buf.len) return error.CorruptedFileSys;
+        var pos = if (i == 0) blk_off else 0;
+        const eoff = bi * block_size;
         while (pos < block_size) {
             const entry = @as(*DirEntry, @ptrCast(&buf[pos]));
             if (entry.inode == 0) break;
             const name_ptr = @as([*]const u8, @ptrCast(&entry.name));
             const name = name_ptr[0..entry.name_len];
+            const d_len = p_len + name.len + 1;
+            const next = @as([*]u8, @ptrCast(dp)) + d_len;
+            if (@as(u64, @intFromPtr(next)) > @as(u64, @intFromPtr(dend))) break :outer;
             pos += entry.rec_len;
-            if (std.mem.eql(u8, name, ".")
-                or std.mem.eql(u8, name, "..")) {
-                continue;
-            }
-            const in = try readINode(entry.inode);
-            const dir = (in.mode & 0xf000) == 0x4000;
-            if (dir) {
-                console.print("d:{s} {s}\n", .{ds, name});
-                try listDir(&in, ident+1);
-            } else {
-                console.print("f:{s} {s}\n", .{ds, name});
-            }
+            r_off += entry.rec_len;
+            //if (std.mem.eql(u8, name, ".")
+            //    or std.mem.eql(u8, name, "..")) {
+            //    continue;
+            //}
+            const namep:[*]u8 = @ptrCast(&dp.d_name);
+            @memcpy(namep, name);
+            namep[name.len] = 0;
+            dp.d_ino = entry.inode;
+            dp.d_off = @as(i64, @intCast(eoff)) + @as(i64, @intCast(pos));
+            dp.d_type = entry.file_type;
+            dp.d_reclen = @intCast(d_len);
+            ret += @intCast(d_len);
+            dp = @ptrCast(next);
         }
-    }
 
+    }
+    poff.* = r_off;
+    return ret;
 }
 
 const console = @import("../../console.zig");

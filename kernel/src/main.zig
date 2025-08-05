@@ -101,7 +101,8 @@ fn runShell(_:?*anyopaque) u16 {
     //const envp = [_]?[*:0]const u8 {"testenv1=ok", "testenv2=no", null};
     //_ = exec.sysExecve("/bin/us", @constCast(@ptrCast(&args)), @constCast(@ptrCast(&envp)));
     //_ = exec.sysExecve("/bin/doomgeneric", @constCast(@ptrCast(&args)), @constCast(@ptrCast(&envp)));
-    const r = exec.sysExecve("/bin/dash", null, null);
+    const envp = [_]?[*:0]const u8 {"LS_COLORS=", "PS1=$PWD # ", null};
+    const r = exec.sysExecve("/bin/dash", null, @constCast(@ptrCast(&envp)));
     if (r == -1) {
         std.debug.panic("unable to start shell\n", .{});
     }

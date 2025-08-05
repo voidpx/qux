@@ -8,8 +8,16 @@ pub const FileList = list.List(*File);
 const object = @import("object.zig");
 const io = @import("io.zig");
 const task = @import("task.zig");
-/// an open file
 
+pub const DEntry = extern struct {
+    d_ino:u64 align(1) = 0,
+    d_off:i64 align(1) = 0,
+    d_reclen:u16 align(1) = 0,
+    d_type:u8 align(1) = 0,
+    d_name:[0]u8 align(1),
+};
+
+/// an open file
 pub const File = struct {
     ctx:?*anyopaque = null,
     pos:u64 = 0,
@@ -76,6 +84,7 @@ pub const FileType = enum(u8) {
 
 pub const FsOp = struct {
     lookup:*const fn(fs:*MountedFs, path:[]const u8, flags:u32) anyerror!Path,
+    lookupAt: *const fn(_:*MountedFs, dir:Path, name:[]const u8, flags:u32) anyerror!Path,
     free_path:*const fn(fs:*MountedFs, path:Path) void,
     copy_path:*const fn(fs:*MountedFs, path:Path) anyerror!Path,
     stat:*const fn(fs:*MountedFs, path:Path, stat:*Stat) anyerror!i64
@@ -86,6 +95,7 @@ pub const FileOps = struct {
     write:*const fn(file:*File, buf:[]const u8) anyerror!usize,
     finalize:?*const fn(file:*File) anyerror!void = null,
     ioctl:?*const fn(file:*File, cmd:u32, arg:u64) i64 = null,
+    readdir:?*const fn(file:*File, d:*DEntry, len:u64) anyerror!i64 = null,
 };
 
 pub const MountedFs = struct {
@@ -125,6 +135,7 @@ pub fn init() void {
     syscall.registerSysCall(syscall.SysCallNo.sys_read, &sysRead);
     syscall.registerSysCall(syscall.SysCallNo.sys_readv, &sysReadV);
     syscall.registerSysCall(syscall.SysCallNo.sys_write, &sysWrite);
+    syscall.registerSysCall(syscall.SysCallNo.sys_sendfile64, &sysSendFile);
     syscall.registerSysCall(syscall.SysCallNo.sys_readlink, &sysReadLink);
     syscall.registerSysCall(syscall.SysCallNo.sys_readlinkat, &sysReadLinkAt);
     syscall.registerSysCall(syscall.SysCallNo.sys_ioctl, &sysIoCtl);
@@ -136,6 +147,11 @@ pub fn init() void {
     syscall.registerSysCall(syscall.SysCallNo.sys_dup, &sysDup);
     syscall.registerSysCall(syscall.SysCallNo.sys_dup2, &sysDup2);
     syscall.registerSysCall(syscall.SysCallNo.sys_chdir, &sysChDir);
+    syscall.registerSysCall(syscall.SysCallNo.sys_newfstatat, &sysNewFStatAt);
+    syscall.registerSysCall(syscall.SysCallNo.sys_openat, &sysOpenAt);
+    syscall.registerSysCall(syscall.SysCallNo.sys_newfstat, &sysFStat);
+    syscall.registerSysCall(syscall.SysCallNo.sys_newlstat, &sysLStat);
+    syscall.registerSysCall(syscall.SysCallNo.sys_getdents64, &sysGetDents64);
 }
 
 const console = @import("console.zig");
@@ -162,6 +178,26 @@ pub export fn sysMkDir(path: [*:0]const u8, mode:u16) callconv(std.builtin.Calli
     return 0;
 }
 
+const AT_FDCWD = -100;
+
+pub export fn sysNewFStatAt(dfd:i32, name: [*:0]const u8, st:*Stat, flags:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const len = std.mem.len(name);
+    if (len == 0) return -1;
+    if (name[0] == '/') {
+        return sysStat(name, st);
+    }
+    var dir:Path = undefined;
+    if (dfd == AT_FDCWD) {
+        dir = task.getCurrentTask().fs.cwd.?;
+    } else {
+        dir = (task.getCurrentTask().fs.open_files.items[@intCast(dfd)] orelse return -1).path;
+    }
+    const p = mounted_fs.ops.lookupAt(mounted_fs, dir, name[0..len], flags) catch {
+        return -syscall.ENOENT; // NOENT
+    };
+    defer mounted_fs.ops.free_path(mounted_fs, p);
+    return mounted_fs.ops.stat(mounted_fs, p, st) catch return -1;
+}
 
 pub export fn sysStat(path: [*:0]const u8, st:*Stat) callconv(std.builtin.CallingConvention.SysV) i64 {
     const len = std.mem.len(path);
@@ -170,6 +206,16 @@ pub export fn sysStat(path: [*:0]const u8, st:*Stat) callconv(std.builtin.Callin
     };
     defer mounted_fs.ops.free_path(mounted_fs, p);
     return mounted_fs.ops.stat(mounted_fs, p, st) catch return -1;
+}
+
+pub export fn sysLStat(path: [*:0]const u8, st:*Stat) callconv(std.builtin.CallingConvention.SysV) i64 {
+    return sysStat(path, st);
+}
+
+pub export fn sysFStat(fd:u32, st:*Stat) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const file = task.getCurrentTask().fs.open_files.items[fd] orelse return -1;
+    return file.path.fs.ops.stat(file.path.fs, file.path, st) catch return -1;
+    //return mounted_fs.ops.stat(mounted_fs, file.path, st) catch return -1;
 }
 
 pub export fn sysClose(fd:i64) callconv(std.builtin.CallingConvention.SysV) i64 {
@@ -292,6 +338,20 @@ pub export fn sysChDir(path: [*:0]const u8) callconv(std.builtin.CallingConventi
     return 0;
 }
 
+pub export fn sysOpenAt(dfd:i32, path: [*:0]const u8, flags:u32, mode:u16) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const t = task.getCurrentTask();
+    const fd = t.fs.getFreeFd() catch return -1;
+    const len = std.mem.len(path);
+    if (len == 0) return -1;
+    if (path[0] == '/') {
+        return sysOpen(path, flags, mode);
+    }
+    const file = openAt(dfd, path, flags) catch return -1;
+    t.fs.installFd(fd, file);
+    return @intCast(fd);
+
+}
+
 pub export fn sysOpen(path: [*:0]const u8, flags:u32, mode:u16) callconv(std.builtin.CallingConvention.SysV) i64 {
     _=&mode;
     const t = task.getCurrentTask();
@@ -308,6 +368,28 @@ pub export fn sysOpen(path: [*:0]const u8, flags:u32, mode:u16) callconv(std.bui
 
 }
 
+pub fn openAt(dfd:i32, path: [*:0]const u8, flags:u32) !*File {
+    const len = std.mem.len(path);
+    if (len == 0) return error.InvalidPath;
+    var dir:Path = undefined;
+    if (dfd == AT_FDCWD) {
+        dir = task.getCurrentTask().fs.cwd.?;
+    } else {
+        dir = (task.getCurrentTask().fs.open_files.items[@intCast(dfd)] orelse return error.InvalidFd).path;
+    }
+    const p = mounted_fs.ops.lookupAt(mounted_fs, dir, path[0..len], flags) catch {
+        return error.FileNotFound; // NOENT
+    };
+    const file = File.get_new(p, p.fs.fops) catch |err| {
+        p.fs.ops.free_path(p.fs, p);
+        return err;
+    };
+    var st:Stat = undefined;
+    if (sysNewFStatAt(dfd, path, &st, flags) == 0) {
+        file.size = st.st_size;
+    }
+    return file;
+}
 pub fn open(path: [*:0]const u8, flags:u32) !*File {
     const len = std.mem.len(path);
     const f = try mounted_fs.ops.lookup(mounted_fs, path[0..len], flags);
@@ -345,6 +427,27 @@ pub export fn sysLSeek(fd: u32, off:i64, whence:u32) callconv(std.builtin.Callin
     }
     return 0;
 
+}
+
+pub export fn sysGetDents64(fd: u32, buf: *DEntry, len:u64) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const f = task.getCurrentTask().fs.open_files.items[fd] orelse return -1;
+    const sz = (f.ops.readdir orelse return -1)(f, buf, len) catch return -1;
+    //f.pos += @intCast(sz);
+    return sz;
+}
+
+pub export fn sysSendFile(out_fd: u32, in_fd: u32, offset:*u64, count:u64) callconv(std.builtin.CallingConvention.SysV) i64 {
+    _=&offset;
+    var st:Stat = undefined;
+    if (sysFStat(in_fd, &st) < 0) return -1;
+    const len = @min(count, st.st_size);
+    const buf = alloc.alloc(u8, len) catch return -1;
+    defer alloc.free(buf);
+    const r = sysRead(in_fd, @ptrCast(buf.ptr), len);
+    if (r < 0) {
+        return r;
+    }
+    return sysWrite(out_fd, @ptrCast(buf.ptr), @intCast(r));
 }
 
 pub export fn sysRead(fd: u32, buf: [*]u8, len:u64) callconv(std.builtin.CallingConvention.SysV) i64 {

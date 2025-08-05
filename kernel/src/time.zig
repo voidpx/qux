@@ -125,6 +125,15 @@ pub fn init() void {
     syscall.registerSysCall(syscall.SysCallNo.sys_nanosleep, &sysNanoSleep);
     syscall.registerSysCall(syscall.SysCallNo.sys_clock_nanosleep, &sysCloskNanoSleep);
     syscall.registerSysCall(syscall.SysCallNo.sys_clock_gettime, &sysClockGetTime);
+    syscall.registerSysCall(syscall.SysCallNo.sys_time, &sysTime);
+}
+
+pub export fn sysTime(tp:?*i64) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const t =getTime();   
+    if (tp) |p| {
+        p.* = t.sec;
+    }
+    return t.sec;
 }
 
 pub export fn sysClockGetTime(clock_id:i32, ret:*Time) callconv(std.builtin.CallingConvention.SysV) i64 {

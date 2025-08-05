@@ -636,7 +636,7 @@ pub export fn sysSetTidAddr(addr:?*u32) callconv(std.builtin.CallingConvention.S
 pub export fn sysSetRobustList(addr:u64, len:usize) callconv(std.builtin.CallingConvention.SysV) i64 {
     _=&addr; // add this to Task
     _=&len;
-    return 0;
+    return -1;
 }
 
 

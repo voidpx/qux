@@ -316,8 +316,18 @@ const console_fops:fs.FileOps = .{.read = &consoleFileRead,
     .write = &consoleFileWrite,
     .ioctl = &consoleIoCtl,    
 };
-const console_fsop:fs.FsOp = .{.stat = undefined, .lookup = undefined, .copy_path = undefined, .free_path = &dummyFreePath};
+const console_fsop:fs.FsOp = .{.stat = &dummyStat, .lookup = undefined, .lookupAt = undefined, .copy_path = undefined, .free_path = &dummyFreePath};
 const console_fs:fs.MountedFs = .{.ops = &console_fsop, .ctx = null, .root = undefined, .fops = &console_fops};
+
+fn dummyStat(f:*fs.MountedFs, path:fs.Path, stat:*fs.Stat) anyerror!i64 {
+    _=&f;
+    _=&path;
+    _=&stat;
+    stat.* = std.mem.zeroes(fs.Stat);
+    stat.st_mode = 0x2000;
+    stat.st_ino = 0xffff;
+    return 0;
+}
 
 const WinSize = extern struct {
     rows:u16 align(1) = 0,
@@ -349,7 +359,10 @@ fn consoleIoCtl(file:*fs.File, cmd:u32, arg:u64) i64 {
             const ttyp:*Tty = @alignCast(@ptrCast(file.ctx.?));
             ttyp.gpid = pidp.*;
         },
-        else => std.debug.panic("ioctl command not implemented: {}\n", .{cmd}),
+        else => {
+            print("ioctl command not implemented: 0x{x}\n", .{cmd});
+            return -1;
+        }
     }
     return 0;
 }

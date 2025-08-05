@@ -18,6 +18,7 @@ const pipe_fops:fs.FileOps = .{
 const pipe_fs_ops:fs.FsOp = .{
     .stat = undefined,
     .lookup = undefined,
+    .lookupAt = undefined,
     .copy_path = undefined,
     .free_path = &dummpyFreePath
 };
