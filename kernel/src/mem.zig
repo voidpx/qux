@@ -227,7 +227,12 @@ pub fn mapUserVm(pgd:*PageTable, start:u64, end:u64) !void {
         }
         a += page_size;
     }
+    const arr:[*]u8 = @ptrFromInt(start); 
+    @memset(arr[0..end-start], 0);
+    for (s..s+pgs) |ad| {
+        asm volatile("invlpg (%rax)" :: [addr] "{rax}" (ad) : "memory");
 
+    }
 }
 
 pub fn dropUserMemRange(pgd: *PageTable, start:u64, end:u64) void {

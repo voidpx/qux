@@ -38,6 +38,8 @@ pub const VmRange = struct {
     start:u64,
     end:u64,
     node:VmNode = undefined,
+    fd:i64 = -1,
+    flags:u64 = 0,
     pub fn new() !*VmRange {
         return mem.allocator.create(VmRange);
     }
@@ -72,7 +74,7 @@ pub const Mem = struct {
             if (vr.start > last_end and vr.start - last_end >= size) {
                 return last_end;
             }
-            last_end = (vr.end + mem.page_size) & ~(mem.page_size - 1);
+            last_end = (vr.end + mem.page_size - 1) & ~(mem.page_size - 1);
         }
         return if (end - last_end >= size) last_end else 0;
     }
@@ -91,9 +93,12 @@ pub const Mem = struct {
                return mem.MemoryError.InvalidMemory;
             }
             var it = m.vm.inorderIterator();
+            //a &= ~(mem.page_size - 1);
             const vr = VmRange{.start = a, .end = a + size};
             while (it.next()) |n| {
-                if (@as(*VmRange, @ptrCast(@alignCast(n.key))).overlaps(&vr)) {
+                const t = @as(*VmRange, @ptrCast(@alignCast(n.key)));
+                if (t.start >= vr.end) break;
+                if (t.overlaps(&vr)) {
                     return mem.MemoryError.InvalidMemory;
                 }
             }
@@ -105,6 +110,9 @@ pub const Mem = struct {
         ent.set(&new.node);
         if (flags & MAP_NOFT > 0) {
             try mem.mapUserVm(m.pgd, new.start, new.end);
+            //console.print("mmap: 0x{x} - 0x{x}\n", .{new.start, new.end});
+        } else {
+            //console.print("mmap lazy: 0x{x} - 0x{x}\n", .{new.start, new.end});
         }
         return new;
     }
@@ -126,11 +134,14 @@ pub const Mem = struct {
         const l = lock.cli();
         defer lock.sti(l);
         var v = VmRange{.start = start, .end = start + size};
+        //console.print("munmap: 0x{x} - 0x{x}\n", .{v.start, v.end});
         var e = m.vm.getEntryFor(&v);
         if (e.node) |n| {
             var vr:*VmRange = @alignCast(@ptrCast(n.key));
             e.set(null);
             vr.drop(m);
+        } else {
+            console.print("munmap: 0x{x} - 0x{x}, NOT FOUND\n", .{v.start, v.end});
         }
     }
 
@@ -173,7 +184,7 @@ pub const Mem = struct {
         var it = this.vm.inorderIterator();
         while (it.next()) |n| {
             const v:*VmRange= @alignCast(@ptrCast(n.key));
-            _=try new.mmap(v.start, v.end - v.start, 0);
+            _=try new.mmap(v.start, v.end - v.start, 0); // flag must be 0 
         }
         return new;
     }
@@ -647,6 +658,8 @@ pub export fn sysBrk(addr:u64) callconv(std.builtin.CallingConvention.SysV) i64 
         //console.print("sysBrk: 0x{x}, current brk:0x{x}\n", .{addr, mm.brk});
         mm.brk = addr;
         return 0;
+    } else if (addr != 0) {
+        //console.print("sysBrk shrink: 0x{x}, current brk:0x{x}\n", .{addr, mm.brk});
     }
     return @intCast(mm.brk);
 }
@@ -658,7 +671,11 @@ pub export fn sysMMap(addr:u64, len:u64, prot:i32, flags:i32, fd:i32, off:u64)
     _=&fd;
     _=&off;
     const mm = getCurrentTask().mem;
-    const a = mm.mmap(addr, len, Mem.MAP_NOFT) catch return -1;
+    const a = mm.mmap(addr, len, Mem.MAP_NOFT) catch {
+        console.print("unable to mmap: 0x{x} - 0x{x}\n", .{addr, addr + len});
+        return -1;
+    };
+
     //console.print("mmap 0x{x}, len:0x{x}, at:0x{x}\n", .{addr, len, a.start});
     return @intCast(a.start);
 }
@@ -1000,7 +1017,7 @@ fn setupTask(a:*const CloneArgs, task:*Task, cur:*Task) !void {
     task.name_len = last;
     const fp = task.stack + task_stack_size - @sizeOf(NewTaskFrame);
     var frame:*NewTaskFrame = @ptrFromInt(fp);
-    // TODO: init frame with 0s
+    @memset(@as([*]u8, @ptrCast(frame))[0..@sizeOf(NewTaskFrame)], 0);
     frame.ret_addr = @intFromPtr(&newTaskEntry);
     task.pid = cur.pid;
     if (a.func) |f| { // kernel thread

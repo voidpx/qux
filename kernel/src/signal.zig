@@ -13,10 +13,12 @@ pub const SigFrame = extern struct {
     }
 };
 
+const types = @import("lib/types.zig");
 pub const TaskSignal = struct {
     sig:u64 = 0,
     mask_set:u64 = 0,
     sig_actions:[64]SigAction = .{SigAction{}}**64,
+    in_signal:types.AtomicBool = types.AtomicBool.init(false),
 
     pub fn signalOn(t:*@This(), s: Signal) bool {
         const bit = @as(u64, 1) << @truncate(@intFromEnum(s) - 1);
@@ -132,18 +134,27 @@ pub fn handleSignals(t:*task.Task) void {
         if (t.signal.signalOn(s)) {
             t.signal.clearSignal(s);
             handleSignal(f.value);
-            
+            break; 
         }
     }
 }
 
+const lock = @import("lock.zig");
 fn handleSignal(s:i32) void {
     const t = task.getCurrentTask();
+    if (t.signal.in_signal.cmpxchgWeak(false, true, .acquire, .monotonic)) |_| {
+        console.print("in signal, skip\n", .{});
+        return;
+    }
     const act = t.signal.sig_actions[@intCast(s)];
     const handler = act.handler orelse {
         if (t.id > 1) {
+            //console.print("no handler for signal {}, kill task:0x{x}\n", .{s, @as(u64, @intFromPtr(t))});
             task.taskExit(t, 1); 
+            unreachable;
         }
+        // init process, ignore sig
+        _=task.getCurrentTask().signal.in_signal.cmpxchgWeak(true, false, .acquire, .monotonic);
         return;
     };
     //console.print("handling signal {}, task:0x{x}\n", .{s, @as(u64, @intFromPtr(t))});
@@ -190,7 +201,6 @@ fn handleSignal(s:i32) void {
     regs.rsi = @intFromPtr(&sigframe.sig_info);
     regs.rax = 0;
     regs.rdx = @intFromPtr(&sigframe.context);
-
 }
 
 pub export fn sysRtSigReturn() callconv(std.builtin.CallingConvention.SysV) i64 {
@@ -218,6 +228,7 @@ pub export fn sysRtSigReturn() callconv(std.builtin.CallingConvention.SysV) i64 
     regs.rip  =   sigframe.context.ip; 
     regs.syscall_no = -1;
 
+    _=task.getCurrentTask().signal.in_signal.cmpxchgWeak(true, false, .acquire, .monotonic);
     return @bitCast(regs.rax);
 }
 

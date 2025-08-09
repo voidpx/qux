@@ -72,10 +72,11 @@ fn onExit(ctx:?*anyopaque, _:*task.Task) void {
 
 const console = @import("console.zig");
 pub fn sleep(t: *const Time, rem:?*Time) i32 {
+    const ct = t.*;
     if (rem) |r| r.* = .{};
     var now = getTime();
     var dup = now;
-    const expire = dup.add(t.*);
+    const expire = dup.add(ct);
     if (expire.getAsMilliSeconds() <= now.getAsMilliSeconds()) return 0;
     var cur = task.getCurrentTask();
     const v = lock.cli();

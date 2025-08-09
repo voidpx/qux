@@ -69,12 +69,12 @@ comptime {
         \\ // setup interrupt stack: ss, sp, eflags, cs, ip, for iret
         ++ std.fmt.comptimePrint("\npush $0x{x}\n", .{gdt.uds}) ++
             \\ push task.tss+20(%rip)
-            \\ sti
             \\ push %r11
         ++ std.fmt.comptimePrint("\npush $0x{x}\n", .{gdt.ucs}) ++
             \\ push %rcx
             \\ push $0
             \\ push %rax
+            \\ sti
             \\
             \\entry_call syscall, exit_call,  1
             \\  
@@ -92,7 +92,7 @@ pub export fn exit_call(state: *idt.IntState) callconv(std.builtin.CallingConven
     }    // handle signal here
     if (t.id == 0) return;
     const regs = task.getCurrentState();
-    if (regs != state) { // syscall/isr interrupted, don't handle signal
+    if (regs != state or regs.rsp == 0) { // syscall/isr interrupted, don't handle signal
         //if (regs.syscall_no >= 0) {
         //    const sc:SysCallNo = @enumFromInt(regs.syscall_no);
         //    console.print("syscall {} interrupted\n", .{sc});

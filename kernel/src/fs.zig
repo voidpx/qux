@@ -125,6 +125,15 @@ pub const Stat = extern struct {
 	st_ctime:u64,
 	st_ctime_nsec:u64,
 	__unused:[3]u64,
+    pub fn isCDev(s:*Stat) bool {
+        return s.st_mode & 0x2000 == 0x2000;
+    }
+    pub fn isBDev(s:*Stat) bool {
+        return s.st_mode & 0x6000 == 0x6000;
+    }
+    pub fn isPipe(s:*Stat) bool {
+        return s.st_mode & 0x1000 == 0x1000;
+    }
 };
 
 pub var mounted_fs:*MountedFs = undefined;
@@ -225,6 +234,7 @@ pub export fn sysClose(fd:i64) callconv(std.builtin.CallingConvention.SysV) i64 
     }
     const f = files.items[@intCast(fd)] orelse return -1;
     f.put();
+    files.items[@intCast(fd)] = null;
     return 0;
 }
 const F_DUPFD  =	0;
@@ -244,7 +254,9 @@ pub export fn sysDup2(fd:u32, nfd:u32) callconv(std.builtin.CallingConvention.Sy
     if (nfd >= cur.fs.open_files.items.len) {
         cur.fs.ensureUnused(nfd + 1 - cur.fs.open_files.items.len) catch return -1;
     }
-    if (cur.fs.open_files.items[nfd] != null) return -1;
+    if (cur.fs.open_files.items[nfd]) |_| {
+        _=sysClose(nfd);
+    }
     var f = cur.fs.open_files.items[fd] orelse return -1;
     f = f.get() orelse return -1;
     cur.fs.installFd(nfd, f); 
@@ -440,7 +452,7 @@ pub export fn sysSendFile(out_fd: u32, in_fd: u32, offset:*u64, count:u64) callc
     _=&offset;
     var st:Stat = undefined;
     if (sysFStat(in_fd, &st) < 0) return -1;
-    const len = @min(count, st.st_size);
+    const len = if (!st.isBDev()) count else @min(count, st.st_size);
     const buf = alloc.alloc(u8, len) catch return -1;
     defer alloc.free(buf);
     const r = sysRead(in_fd, @ptrCast(buf.ptr), len);
