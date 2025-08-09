@@ -574,7 +574,7 @@ fn readDirEntries(inode: *const INode, poff:*u64, d:*fs.DEntry, len:u64) !i64 {
         }
 
     }
-    poff.* = r_off;
+    poff.* += r_off;
     return ret;
 }
 
