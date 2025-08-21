@@ -307,6 +307,7 @@ pub const TaskFs = struct {
                 f.put();
             }
         }
+        //console.print("droping mem\n", .{});
         if (self.cwd) |w| {
             w.fs.ops.free_path(self.cwd.?.fs, self.cwd.?);
         }

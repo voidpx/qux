@@ -15,8 +15,8 @@ const ATA_REG_CONTROL  :u16 =   (ATA_PRIMARY_CTRL);
 const ATA_CMD_READ_PIO_EXT:u8 = 0x24;
 const ATA_CMD_IDENTIFY:u8 =     0xEC;
 
-const ATA_CMD_WRITE_PIO_EXT   = 0x34;
-const ATA_CMD_CACHE_FLUSH_EXT = 0xEA;
+const ATA_CMD_WRITE_PIO_EXT:u8   = 0x34;
+const ATA_CMD_CACHE_FLUSH_EXT:u8 = 0xEA;
 
 
 const bytes_per_sector:u32 = 512;
@@ -48,7 +48,7 @@ fn readNoCheck(lba:u64, sector_count:u16, buffer:[]u16) io.IOError!void {
     io.out(ATA_REG_LBA0, @as(u8, @truncate((lba >> 0))));          // LBA bits 0-7
     io.out(ATA_REG_LBA1, @as(u8, @truncate((lba >> 8))));          // LBA bits 8-15
     io.out(ATA_REG_LBA2, @as(u8, @truncate((lba >> 16))));         // LBA bits 16-23
-    io.out(ATA_REG_COMMAND, @as(u8, ATA_CMD_READ_PIO_EXT));
+    io.out(ATA_REG_COMMAND, ATA_CMD_READ_PIO_EXT);
 
     ata_wait_busy();
     for (0..sector_count) |i| {
@@ -86,32 +86,42 @@ fn write(lba: u64, sector_count: u16, buffer: []u16) !void {
     std.debug.assert((sector_count << 8) == buffer.len); // 512 bytes per sector
 
     // Select master drive with LBA bit set
-    io.out(ATA_REG_HDDEVSEL, 0xE0);
+    io.out(ATA_REG_HDDEVSEL, ATA_MASTER);
     ata_delay();
 
     // Write high bytes first (LBA48 protocol)
-    io.out(ATA_REG_SECCOUNT0, @as(u8, sector_count >> 8));
-    io.out(ATA_REG_LBA0, @as(u8, lba >> 24));
-    io.out(ATA_REG_LBA1, @as(u8, lba >> 32));
-    io.out(ATA_REG_LBA2, @as(u8, lba >> 40));
+    io.out(ATA_REG_SECCOUNT0, @as(u8, @truncate(sector_count >> 8)));
+    io.out(ATA_REG_LBA0, @as(u8, @truncate(lba >> 24)));
+    io.out(ATA_REG_LBA1, @as(u8, @truncate(lba >> 32)));
+    io.out(ATA_REG_LBA2, @as(u8, @truncate(lba >> 40)));
 
     // Then write low bytes
-    io.out(ATA_REG_SECCOUNT0, @as(u8, sector_count));
-    io.out(ATA_REG_LBA0, @as(u8, lba >> 0));
-    io.out(ATA_REG_LBA1, @as(u8, lba >> 8));
-    io.out(ATA_REG_LBA2, @as(u8, lba >> 16));
+    io.out(ATA_REG_SECCOUNT0, @as(u8, @truncate(sector_count)));
+    io.out(ATA_REG_LBA0, @as(u8, @truncate(lba >> 0)));
+    io.out(ATA_REG_LBA1, @as(u8, @truncate(lba >> 8)));
+    io.out(ATA_REG_LBA2, @as(u8, @truncate(lba >> 16)));
 
     // Send write command
     io.out(ATA_REG_COMMAND, ATA_CMD_WRITE_PIO_EXT); // 0x34
 
     ata_wait_busy();
-    ata_wait_drq();
-
-    // Write data: 256 words (512 bytes) per sector
-    for (buffer) |word| {
-        io.out(ATA_REG_DATA, word);
+    for (0..sector_count) |i| {
+        ata_wait_drq();
+        const status = io.in(u8, ATA_REG_STATUS);
+        if ((status & 0x01) != 0) {
+            const err = io.in(u8, ATA_REG_ERROR);
+            console.print("ATA Error: {x}\n", .{err});
+            return io.IOError.WriteError;
+        }
+        if (status & 0x20 != 0) { // DF bit
+            return io.IOError.WriteError;
+        }
+        const start = i << 8;
+        for (0..256) |j| {
+            const w = buffer[start + j];
+            io.out(ATA_REG_DATA, w);
+        }
     }
-
     ata_wait_busy();
 
     // Flush cache to ensure data hits disk
@@ -123,7 +133,7 @@ fn write(lba: u64, sector_count: u16, buffer: []u16) !void {
 var capacity:u32 = 0; // in sectors
 pub fn init() void {
     // 1. Select primary master (0xA0 = master, 0xB0 = slave)
-    io.out(ATA_REG_HDDEVSEL, @as(u8, ATA_MASTER));
+    io.out(ATA_REG_HDDEVSEL, ATA_MASTER);
     ata_delay();
 
     // 2. Send IDENTIFY command
@@ -187,7 +197,7 @@ var parts:[4]blk.BlockDevice = undefined;
 fn readBlks(bdev:*blk.BlockDevice, start:usize, buf:[]u8) io.IOError!void {
     var off:usize = 0;
     if (bdev.ctx) |c| {
-        off = @intFromPtr(c);
+        off = @intFromPtr(c); // partition start
     }
     off+=start;
     const blk_cnt = buf.len >> @as(u6, @truncate(bdev.blk_size_shift));
@@ -195,13 +205,23 @@ fn readBlks(bdev:*blk.BlockDevice, start:usize, buf:[]u8) io.IOError!void {
         return io.IOError.ReadError;
     }
     const buf2:[*]u16 align(1) = @alignCast(@ptrCast(buf.ptr));
+    //XXX: handle blk_cnt >= 2^16 
     try read(off, @truncate(blk_cnt), buf2[0..buf.len/2]);
 }
 
-fn writeBlks(bdev:*blk.BlockDevice, start:usize, buf:[]u8) io.IOError!void {
-    _=&bdev;
-    _=&start;
-    _=&buf;
+fn writeBlks(bdev:*blk.BlockDevice, start:usize, buf:[]const u8) io.IOError!void {
+    var off:usize = 0;
+    if (bdev.ctx) |c| {
+        off = @intFromPtr(c); // partition start
+    }
+    off+=start;
+    const blk_cnt = buf.len >> @as(u6, @truncate(bdev.blk_size_shift));
+    if (off + blk_cnt > bdev.capacity) {
+        return io.IOError.ReadError;
+    }
+    const buf2:[*]u16 align(1) = @alignCast(@ptrCast(@constCast(buf.ptr)));
+    //XXX: handle blk_cnt >= 2^16 
+    try write(off, @truncate(blk_cnt), buf2[0..buf.len/2]);
 }
 
 var part_table:PartTable = undefined;

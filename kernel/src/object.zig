@@ -65,6 +65,14 @@ inline fn toBaseObj(obj:anytype, tp:type) *tp {
     return op;
 }
 
+pub fn getRefCount(obj:anytype) u64 {
+    const ti = @typeInfo(@TypeOf(obj));
+    comptime std.debug.assert(ti == .pointer);
+    const ot = ti.pointer.child;
+    const bt = getObjType(ot);
+    const op = toBaseObj(obj, bt);
+    return op.__obj_base.ref_count.raw;
+}
 
 pub fn get(obj:anytype) ?@TypeOf(obj) {
     const ti = @typeInfo(@TypeOf(obj));

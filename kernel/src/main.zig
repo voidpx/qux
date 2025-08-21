@@ -151,7 +151,7 @@ fn initThread(_:?*anyopaque) u16 {
 
 fn printMemStat(_: ?*anyopaque) u16 {
     while (true) {
-        time.sleep(.{.sec = 5});
+        _ = time.sleep(&.{.sec = 5}, null);
         task.runq.shrinkAndFree(@min(@max(task.runq.count(), 10), task.runq.capacity()));
         const m = mem.getMemStat();
         console.print("memory: used pages: {}, free pages: {}, total tasks: {}\n", .{m.used_pages, m.free_pages, task.getTotalTasks()});

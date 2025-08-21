@@ -67,6 +67,7 @@ fn getPipe(a:*anyopaque) struct {*Pipe, bool} {
     return .{p, isRead};
 }
 
+const console = @import("console.zig");
 fn finalize(file:*fs.File) anyerror!void {
     const l = lock.cli();
     defer lock.sti(l);
@@ -79,6 +80,7 @@ fn finalize(file:*fs.File) anyerror!void {
     } else {
         p.closeWrite();
     }
+    console.print("put pipe 0x{x}, refcount: {}\n", .{@as(u64, @intFromPtr(p)), obj.getRefCount(p)});
     obj.put(p);
 }
 

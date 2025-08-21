@@ -2,6 +2,7 @@ const std = @import("std");
 const blk = @import("../block.zig");
 const fs = @import("../../fs.zig");
 const task = @import("../../task.zig");
+const bitset = @import("../../lib/bitset.zig");
 const EXT2_SUPERBLOCK_OFFSET = 1024;
 const EXT2_SUPER_MAGIC = 0xEF53;
 var block_size:u32 = 1024; 
@@ -19,6 +20,8 @@ var single_indirect_blk:usize = undefined;
 var double_indirect_blk:usize = undefined;
 var triple_indirect_blk:usize = undefined;
 var entries_per_blk:u32 = undefined;
+
+var n_groups:u32 = 0;
 
 var bdev:*blk.BlockDevice = undefined;
 var ext2fs:fs.MountedFs = undefined;
@@ -63,13 +66,13 @@ fn readdir(file:*fs.File, d:*fs.DEntry, len:u64) !i64 {
     return sz;
 }
 
-fn lookupAt(_:*fs.MountedFs, dir:fs.Path, name:[]const u8, flags:u32) anyerror!fs.Path {
+fn lookupAt(_:*fs.MountedFs, dir:fs.Path, name:[]const u8, flags:u32, mode:u32) anyerror!fs.Path {
     var d = try dir.copy();
-    const e = try lookupDEntry(d.entry, name, flags);
+    const e = try lookupDEntry(d.entry, name, flags, mode);
     return d.append(e).*;
 }
 
-fn lookup(mfs:*fs.MountedFs, path:[]const u8, flags:u32) anyerror!fs.Path {
+fn lookup(mfs:*fs.MountedFs, path:[]const u8, flags:u32, mode:u32) anyerror!fs.Path {
     const cur = task.getCurrentTask().fs.cwd.?;
     if (path.len == 0) { // cwd
         return cur.copy();
@@ -83,7 +86,7 @@ fn lookup(mfs:*fs.MountedFs, path:[]const u8, flags:u32) anyerror!fs.Path {
     var it = std.mem.splitSequence(u8, path, "/");
     while (it.next()) |e| {
         if (e.len == 0) continue;
-        const f = lookupDEntry(p.entry, e, flags) catch |err| {
+        const f = lookupDEntry(p.entry, e, flags, mode) catch |err| {
             freePath(mfs, p);
             return err;
         };
@@ -92,8 +95,7 @@ fn lookup(mfs:*fs.MountedFs, path:[]const u8, flags:u32) anyerror!fs.Path {
     return p;
 }
 
-fn lookupDEntry(d:*fs.DirEntry, name:[]const u8, flags:u32) !*fs.DirEntry {
-    _=flags;
+fn lookupDEntry(d:*fs.DirEntry, name:[]const u8, flags:u32, mode:u32) !*fs.DirEntry {
     var n = name;
     if (name.len == 0)
         return error.EmptyFileName;
@@ -108,14 +110,30 @@ fn lookupDEntry(d:*fs.DirEntry, name:[]const u8, flags:u32) !*fs.DirEntry {
     if (!inode.isDir()) {
         return error.FileNotFound;
     }
-    if (std.mem.eql(u8, n, ".")) return dupDirEntry(d);
+    //if (std.mem.eql(u8, n, ".")) return dupDirEntry(d);
+    //if (std.mem.eql(u8, n, "..")) {
+    //    if (d.prev) |p| {
+    //        return dupDirEntry(p);
+    //    }
+    //    return dupDirEntry(d);
+    //}
+
+    var n_ino:?u32 = null;
+    if (std.mem.eql(u8, n, ".")) n_ino = dir.dentry.inode;
     if (std.mem.eql(u8, n, "..")) {
         if (d.prev) |p| {
-            return dupDirEntry(p);
+            const dp:*DirEntObj = @alignCast(@ptrCast(p.priv));
+            n_ino = dp.dentry.inode;
+        } else {
+            n_ino = dir.dentry.inode;
         }
-        return dupDirEntry(d);
     }
-    return try getDirEnt(&inode, n);
+    var f_type:EntType = .EXT2_FT_REG_FILE;
+    if (mode & s_ifdir > 0) {
+        f_type = .EXT2_FT_DIR;
+    } // others
+
+    return try getOrCreateDirEnt(&inode, dir.dentry.inode, n, flags, n_ino, f_type);
 }
 
 fn freePath(_:*fs.MountedFs, path:fs.Path) void {
@@ -155,20 +173,146 @@ fn copyPath(mfs:*fs.MountedFs, path:fs.Path) anyerror!fs.Path {
 
 const bc = @import("../bcache.zig");
 
-fn getBlockNumRange(n:*const INode, sbi:u64, ebi:u64, bkn:[]u64) !void {
-    std.debug.assert(bkn.len == ebi - sbi);
+fn getZeroBlock0() ![]u8 {
+    const b = try allocator.alloc(u8, block_size);
+    @memset(b, 0);
+    return b;
+
+}
+
+fn getZeroBlock(block:*?[]u8) ![]u8 {
+    return block.* orelse {
+        block.* = try getZeroBlock0();
+        return block.*.?;
+    };
+}
+
+fn zeroDevBlock(blk_num:u32, zero_blk:*?[]u8) !void {
+    const zeros = try getZeroBlock(zero_blk);
+    _=try bdev.write(blk_num * block_size, zeros);
+}
+
+fn appendBlocks(n:*INode, ino:u32, blk_idx:u32, blks:u32, bkn:[]u32) !void {
+    std.debug.assert(bkn.len >= blks);
+    var bcache = bc.BCache.new(bdev, block_size); 
+    defer bcache.drop();
+    const gi = (ino - 1) / super_block.inodes_per_group;
+    var zero_blk:?[]u8 = null;
+    defer {
+        if (zero_blk) |z| allocator.free(z);
+    }
+    var i:usize = 0;
+    for (blk_idx..blk_idx + blks) |bi| {
+        const nblk = try allocBlock(gi);
+        defer {
+            bkn[i] = nblk.blk_num;
+            i+=1;
+        }
+        bkn[i] = nblk.blk_num;
+        if (bi < direct_blk) {
+            n.block[bi] = nblk.blk_num;
+            continue;
+        }
+        if (bi < single_indirect_blk) {
+            var block_num = n.block[direct_blk];
+            if (block_num == 0) {
+                const iblk = try allocBlock(gi);
+                try zeroDevBlock(iblk.blk_num, &zero_blk);
+                n.block[direct_blk] = iblk.blk_num;
+                block_num = iblk.blk_num;
+            }
+            const ia:[*] align(1) u32 = @ptrCast((try bcache.getBlock(block_num)).ptr);
+            ia[bi - direct_blk] = nblk.blk_num;
+            _=try bdev.write(block_num * block_size, @as([*]const u8, @ptrCast(ia))[0..block_size]);
+            continue;
+        }
+        if (bi < double_indirect_blk) {
+            var block_num = n.block[direct_blk + 1];
+            if (block_num == 0) {
+                const iblk = try allocBlock(gi);
+                try zeroDevBlock(iblk.blk_num, &zero_blk);
+                n.block[direct_blk + 1] = iblk.blk_num;
+                block_num = iblk.blk_num;
+            }
+            var ia:[*] align(1) u32 = @ptrCast((try bcache.getBlock(block_num)).ptr);
+            var bii = (bi - single_indirect_blk)/entries_per_blk;
+            const b1 = block_num;
+            block_num = ia[bii];
+            if (block_num == 0) {
+                const iblk = try allocBlock(gi);
+                try zeroDevBlock(iblk.blk_num, &zero_blk);
+                ia[bii] = iblk.blk_num;
+                _=try bdev.write(b1 * block_size, @as([*]const u8, @ptrCast(ia))[0..block_size]);
+                block_num = iblk.blk_num;
+            }
+            ia = @ptrCast((try bcache.getBlock(block_num)).ptr);
+            bii = (bi - single_indirect_blk) % entries_per_blk;
+            ia[bii] = nblk.blk_num;
+            _=try bdev.write(block_num * block_size, @as([*]const u8, @ptrCast(ia))[0..block_size]);
+            continue;
+        }
+        if (bi < triple_indirect_blk) {
+            var block_num = n.block[direct_blk + 2];
+            if (block_num == 0) {
+                const iblk = try allocBlock(gi);
+                try zeroDevBlock(iblk.blk_num, &zero_blk);
+                n.block[direct_blk + 2] = iblk.blk_num;
+                block_num = iblk.blk_num;
+            }
+            var ia:[*] align(1) u32 = @ptrCast((try bcache.getBlock(block_num)).ptr);
+            const epb2 = entries_per_blk*entries_per_blk;
+            var bii = (bi - double_indirect_blk)/epb2;
+            const b1 = block_num;
+            block_num = ia[bii];
+            if (block_num == 0) {
+                const iblk = try allocBlock(gi);
+                try zeroDevBlock(iblk.blk_num, &zero_blk);
+                ia[bii] = iblk.blk_num;
+                _=try bdev.write(b1 * block_size, @as([*]const u8, @ptrCast(ia))[0..block_size]);
+                block_num = iblk.blk_num;
+            }
+            ia = @ptrCast((try bcache.getBlock(block_num)).ptr);
+            const rem = (bi - double_indirect_blk) % epb2;
+            bii = rem/entries_per_blk;
+            const b2 = block_num;
+            block_num = ia[bii];
+            if (block_num == 0) {
+                const iblk = try allocBlock(gi);
+                try zeroDevBlock(iblk.blk_num, &zero_blk);
+                ia[bii] = iblk.blk_num;
+                _=try bdev.write(b2 * block_size, @as([*]const u8, @ptrCast(ia))[0..block_size]);
+                block_num = iblk.blk_num;
+            }
+            ia = @ptrCast((try bcache.getBlock(block_num)).ptr);
+            bii = rem%entries_per_blk;
+            ia[bii] = nblk.blk_num;
+            _=try bdev.write(block_num * block_size, @as([*]const u8, @ptrCast(ia))[0..block_size]);
+            continue;
+        }
+    }
+    try writeINode(ino, n);
+}
+
+fn getBlockNumRange(n:*const INode, sbi:u64, ebi:u64, bkn:[]u32) !void {
+    std.debug.assert(sbi <= ebi and bkn.len >= ebi - sbi);
     var i:usize = 0;
     var bcache = bc.BCache.new(bdev, block_size); 
     defer bcache.drop();
 
-    for (sbi..ebi) |bi| {
+    const nblks = (n.size + block_size - 1) / block_size;
+    var a_sbi = sbi;
+    var a_ebi = ebi;
+    if (sbi >= nblks) {
+        a_sbi = 0;
+        a_ebi = 0;
+    }
+
+    for (a_sbi..a_ebi) |bi| {
         defer {
             if (bkn[i] == 0) {
                 std.debug.panic("bug\n", .{});
             }
-            
             i+=1;
-
         }
         if (bi < direct_blk) {
             bkn[i] = n.block[bi];
@@ -217,10 +361,57 @@ fn getBlockNumRange(n:*const INode, sbi:u64, ebi:u64, bkn:[]u64) !void {
 }
 
 fn write(file:*fs.File, buf:[]const u8) anyerror!usize {
-    _=&file;
-    _=&buf;
-    return error.NotImplemented;
+    var st:fs.Stat = undefined;
+    if (try stat(file.path.fs, file.path, &st) != 0) return error.ErrorWriteFile;
+    const len = file.pos + buf.len; 
+    const sblk = file.pos / block_size;
+    const eblk = (len + block_size - 1) / block_size;
+    const dp:*DirEntObj = @alignCast(@ptrCast(file.path.entry.priv));  
+    var inode = try readINode(dp.dentry.inode);
+    const w_blks = eblk - sblk;
+    const bkn = try allocator.alloc(u32, w_blks);
+    defer allocator.free(bkn);
+    if (st.st_size < len) {
+        // allocate more blocks
+        const ssblk = (st.st_size + block_size - 1) / block_size;
+        const eeblk = (len + block_size - 1) / block_size;
+        const nblks = eeblk - ssblk;
+        if (nblks > 0) {
+            try appendBlocks(&inode, dp.dentry.inode, @intCast(ssblk), @intCast(nblks), bkn);
+        }
+    }
+    try getBlockNumRange(&inode, sblk, eblk, bkn);
+    const foff = file.pos & ~(block_size);
+    var woff:u32 = 0;
+    for (0..w_blks) |i| {
+        const b = bkn[i];
+        var off:u32 = 0;
+        var wlen:u32 = block_size;
+        if (i == 0) {
+            off = @intCast(foff);
+            wlen -= @intCast(foff);
+        }
+        const left = buf.len - woff;
+        wlen = @min(wlen, left);
+        const boff = b * block_size + off;
+        const end = woff + wlen;
+        const ws = try bdev.write(boff, buf[woff..end]);
+        std.debug.assert(ws == wlen);
+        woff += wlen;
+    }
+    if (inode.size < len) {
+        inode.size = @intCast(len);
+    }
+
+    const now = time.getTime().sec;
+    inode.atime = @intCast(now);
+    inode.mtime = @intCast(now);
+    inode.ctime = @intCast(now);
+    
+    try writeINode(dp.dentry.inode, &inode);
+    return buf.len;
 }
+
 
 fn read(file:*fs.File, buf:[]u8) ![]u8 {
     const dp:*DirEntObj = @alignCast(@ptrCast(file.path.entry.priv));  
@@ -231,7 +422,7 @@ fn read(file:*fs.File, buf:[]u8) ![]u8 {
     const rsz = @min(buf.len, inode.size - file.pos);
     const eblk = (file.pos + rsz + block_size - 1)/block_size;
     var si:usize = 0;
-    const bkn = try allocator.alloc(u64, eblk - sblk);
+    const bkn = try allocator.alloc(u32, eblk - sblk);
     defer allocator.free(bkn);
     try getBlockNumRange(&inode, sblk, eblk, bkn);
     for (0..bkn.len) |i| {
@@ -268,6 +459,8 @@ pub fn init() void {
     double_indirect_blk = single_indirect_blk + entries_per_blk * entries_per_blk;
     triple_indirect_blk = double_indirect_blk + entries_per_blk * entries_per_blk * entries_per_blk;
 
+    n_groups = (super_block.blocks_count - super_block.first_data_block 
+            + super_block.blocks_per_group - 1)/super_block.blocks_per_group;
     //const root_inode =  readINode(2) catch unreachable; 
     //listDir(&root, 0) catch unreachable;
     const root = allocator.alloc(u8, @sizeOf(DirEntry) + 1) catch unreachable;
@@ -457,13 +650,34 @@ fn readINode(inode_num: u32) !INode {
     const gi = (inode_num - 1) / super_block.inodes_per_group;
     const ii = (inode_num - 1) % super_block.inodes_per_group;
     const bgd = try readGroupDescriptor(gi);
-    const inode_table_block = bgd.inode_table;
-    const inode_table_start = inode_table_block * block_size;
-    const offset = inode_table_start + ii * super_block.inode_size;
+    return readINodeInGrp(&bgd, ii);
+}
 
+fn readINodeInGrp(grp:*const BlockGroupDescriptor, idx_in_grp:u32) !INode {
+    const inode_table_block = grp.inode_table;
+    const inode_table_start = inode_table_block * block_size;
+    const offset = inode_table_start + idx_in_grp * super_block.inode_size;
     var inode:INode = undefined;
     _ = try bdev.read(offset, std.mem.asBytes(&inode));
     return inode;
+
+}
+
+fn writeINode(inode_num: u32, inode:*INode) !void {
+    const gi = (inode_num - 1) / super_block.inodes_per_group;
+    const ii = (inode_num - 1) % super_block.inodes_per_group;
+    const bgd = try readGroupDescriptor(gi);
+    try writeINodeInGrp(&bgd, ii, inode);
+}
+
+fn writeINodeInGrp(grp:*const BlockGroupDescriptor, idx_in_grp:u32, inode:*INode) !void {
+    const inode_table_block = grp.inode_table;
+    const inode_table_start = inode_table_block * block_size;
+    const offset = inode_table_start + idx_in_grp * super_block.inode_size;
+    const w_len = try bdev.write(offset, std.mem.asBytes(inode));
+    if (w_len != @sizeOf(INode)) {
+        return error.ErrorSavingINode;
+    }
 }
 
 const EntType = enum(u8) {
@@ -477,45 +691,242 @@ const EntType = enum(u8) {
     EXT2_FT_SYMLINK    = 7,
 };
 
-fn getDirEnt(inode:*const INode, ent_name:[]const u8) !*fs.DirEntry {
+fn alignRecLen4(entry:*DirEntry) u32 {
+    const sz:u32 = @sizeOf(DirEntry) + entry.name_len;
+    return align4(sz);
+}
+
+fn align4(i:u32) u32 {
+    return (i + 3) & ~@as(u32, 3);
+}
+
+fn getGroupIdx(ino:u32) u32 {
+    return (ino - 1) / super_block.inodes_per_group;
+}
+
+fn getOrCreateDirEnt(dir_inode:*const INode, dir_ino:u32, ent_name:[]const u8, flags:u32, eino:?u32, etype:?EntType) !*fs.DirEntry {
     var buf = try allocator.alloc(u8, block_size);
     defer allocator.free(buf);
-    var i:usize = 0;
-    while (true) {
-        defer i+=1;
-        if (i >= 12) {
-            std.debug.panic("indirect blocks are not supported yet\n", .{});
-            break;
-        }
-        const block_num = inode.block[i];
+    var gap_entry:?*DirEntry = null;
+    var insert_blk:u32 = 0;
+    var insert_off:u32 = 0;
+    const new_rec_len = align4(@truncate(@sizeOf(DirEntry) + ent_name.len));
+    const total_blks = (dir_inode.size + block_size - 1) / block_size;
+    for (0..total_blks) |i| {
+        var bkn = [_]u32{0};
+        try getBlockNumRange(dir_inode, i, i+1, &bkn);
+        const block_num = bkn[0];
         if (block_num == 0) break;
         const block_offset = block_num * block_size;
         _ = try bdev.read(block_offset, buf);
-        var pos: usize = 0;
+        var pos: u32 = 0;
         while (pos < block_size) {
             const entry = @as(*DirEntry, @ptrCast(&buf[pos]));
-            if (entry.inode == 0) break;
+            if (entry.inode == 0) {
+                if (gap_entry == null and block_size - pos > new_rec_len) {
+                    insert_blk = block_num;
+                    insert_off = pos;
+                }
+                break;
+            }
             const name_ptr = @as([*]const u8, @ptrCast(&entry.name));
             const name = name_ptr[0..entry.name_len];
+            const r_rec_len = alignRecLen4(entry);
+            if (gap_entry == null and entry.rec_len - r_rec_len >= new_rec_len) {
+                insert_blk = block_num;
+                insert_off = pos + r_rec_len;
+                gap_entry = entry;
+            }
             pos += entry.rec_len;
             if (std.mem.eql(u8, name, ent_name)) {
-                const pd = try DirEntObj.new(entry); 
-                const r = allocator.create(fs.DirEntry) catch |err| {
-                    obj.put(pd);
-                    return err;
-                };
-                r.name = pd.name;
-                switch (entry.file_type) {
-                    @intFromEnum(EntType.EXT2_FT_DIR) => r.type = .DIR,
-                    @intFromEnum(EntType.EXT2_FT_SYMLINK) => r.type = .LINK,
-                    else => r.type = .FILE,
-                }
-                r.priv = pd;
-                return r;
+                return try newDirEntry(entry);
             }
         }
     }
+    if (flags & 0o100 > 0) { //O_CREAT
+        const d = try createDirEntry(@constCast(dir_inode), dir_ino, buf, insert_blk, insert_off, gap_entry,
+            ent_name, eino, etype.?);
+        return try newDirEntry(d);
+    }
     return error.FileNotFound;
+}
+
+fn newDirEntry(d:*DirEntry) !*fs.DirEntry {
+    const pd = try DirEntObj.new(d); 
+    errdefer obj.put(pd);
+    const r = try allocator.create(fs.DirEntry) ;
+    r.name = pd.name;
+    switch (d.file_type) {
+        @intFromEnum(EntType.EXT2_FT_DIR) => r.type = .DIR,
+        @intFromEnum(EntType.EXT2_FT_SYMLINK) => r.type = .LINK,
+        else => r.type = .FILE,
+    }
+    r.priv = pd;
+    return r;
+}
+
+const time = @import("../../time.zig");
+fn createDirEntry(dir:*INode, ino:u32, block:[]u8, insert_blk:u32, insert_off:u32, gap_entry:?*DirEntry,
+    name:[]const u8, ent_ino:?u32, ft:EntType) !*DirEntry {
+    var blk_num:u32 = insert_blk;
+    var blk_off:u32 = insert_off; 
+    var buf:[]u8 = block;
+    const new_len = align4(@truncate(@sizeOf(DirEntry) + name.len));
+    var entry:*DirEntry = undefined;
+    if (insert_blk == 0) {
+        // either the directory has no entries at all, or gap wasn't found to insert an entry, either way, a new block
+        // has to be allocated
+        var bkns = [_]u32{0};
+        const index = (dir.size + block_size - 1) & ~(block_size - 1);
+        try appendBlocks(dir, ino, index, 1, bkns[0..1]);
+        blk_num = bkns[0];
+        blk_off = 0;
+        @memset(buf, 0); // zero out the block
+        entry = @ptrCast(buf.ptr);
+        entry.rec_len = @truncate(block_size);
+    } else {
+        entry = @ptrCast(&buf[insert_off]);
+        if (gap_entry) |ge| {
+            const e_len = alignRecLen4(ge);
+            const gap_len = ge.rec_len - e_len;
+            std.debug.assert(gap_len >= new_len);
+            entry.rec_len = @intCast(gap_len);
+            ge.rec_len = @intCast(e_len);
+        } else {
+            const left = block_size - insert_off;
+            std.debug.assert(left >= new_len);
+            entry.rec_len = @intCast(left);
+        }
+    }
+
+    const gi = (ino - 1) / super_block.inodes_per_group;
+    //const an = try allocINode(gi);
+    const e_ino = ent_ino orelse blk: {
+        const an = (try allocINode(gi)).ino;
+        const now = time.getTime().sec;
+        var inode = std.mem.zeroes(INode);
+
+        inode.mode = (if (ft == .EXT2_FT_DIR) s_ifdir else s_ifreg) | 0o754; // TODO: other types
+        inode.atime = @intCast(now);
+        inode.mtime = @intCast(now);
+        inode.ctime = @intCast(now);
+        inode.links_count = 1;
+        // save the inode
+        try writeINode(an, &inode);
+        break :blk an;
+    };
+
+    entry.inode = e_ino;
+    entry.file_type = @intFromEnum(ft);
+    entry.name_len = @intCast(name.len);
+    @memcpy(@as([*]u8, @ptrCast(&entry.name)), name);
+
+    // save the entry
+    _=try bdev.write(blk_num * block_size, buf);
+    return entry;
+}
+
+const INodeAlloc = struct {
+    group:BlockGroupDescriptor,
+    ino:u32,
+    inode:?*INode = null,
+};
+
+fn allocINode(start_gi:u32) !INodeAlloc {
+    const buf = try allocator.alloc(u8, block_size);
+    defer allocator.free(buf);
+    
+    if (allocINodeFromGrp(start_gi, buf)) |r| {
+        return r; // same group
+    } else |_| {
+        for (0..n_groups) |g| {
+            if (g == start_gi) continue;
+            return allocINodeFromGrp(@intCast(g), buf) catch continue;
+        }
+    }
+    return error.OutOfSpace;
+}
+
+fn writeSuperBlock(sb:*SuperBlock) !void {
+    const buf = std.mem.asBytes(sb);
+    const len = try bdev.write(EXT2_SUPERBLOCK_OFFSET, buf);
+    std.debug.assert(buf.len == len);
+}
+
+fn allocINodeFromGrp(g:u32, buf:[]u8) !INodeAlloc {
+    var bgd = try readGroupDescriptor(g);
+    if (bgd.free_inodes_count == 0) return error.NoFreeINode;
+    const off = bgd.inode_bitmap * block_size;
+    _=try bdev.read(off, buf);
+    var bs = bitset.bitSetFrom(buf);
+    const free = bitset.findFirstUnSet(&bs) orelse return error.NoFreeINode;
+    bs.set(free);
+    _=try bdev.write(off, buf); // update inode bitmap
+    bgd.free_inodes_count -= 1;
+    try writeBlockGroupDesc(g, &bgd);
+
+    super_block.free_inodes_count -= 1;
+    try writeSuperBlock(&super_block);
+    const ino = free + g * super_block.inodes_per_group + 1;
+    return INodeAlloc{.group = bgd, .ino = @intCast(ino)};
+}
+
+const BlockAlloc = struct {
+    group:BlockGroupDescriptor,
+    blk_num:u32,
+};
+
+fn allocBlock(start_gi:u32) !BlockAlloc {
+    const buf = try allocator.alloc(u8, block_size);
+    defer allocator.free(buf);
+    
+    if (allocBlkFromGrp(start_gi, buf)) |r| {
+        return r; // same group
+    } else |_| {
+        for (0..n_groups) |g| {
+            if (g == start_gi) continue;
+            return allocBlkFromGrp(@truncate(g), buf) catch continue;
+        }
+    }
+    return error.OutOfSpace;
+}
+
+fn groupHasSb(gi:u32) bool {
+    if (gi == 0) return true;
+    var i = gi;
+    while (i % 3 == 0) i /= 3;
+    while (i % 5 == 0) i /= 5;
+    while (i % 7 == 0) i /= 7;
+    return i == 1;
+}
+
+fn writeBlockGroupDesc(g:u32, gd:*BlockGroupDescriptor) !void {
+    // XXX: don't care about backup for now.
+    //for (0..n_groups) |i| {
+    //    
+    //}
+    const descriptor_offset = if (block_size == 1024) 1024 else 4096 + g * @sizeOf(BlockGroupDescriptor); 
+    const len = try bdev.write(descriptor_offset, std.mem.asBytes(gd));
+    std.debug.assert(len == @sizeOf(BlockGroupDescriptor));
+}
+
+fn allocBlkFromGrp(g:u32, buf:[]u8) !BlockAlloc {
+    var bgd = try readGroupDescriptor(g);
+    if (bgd.free_blocks_count == 0) return error.NoFreeBlock;
+    const off = bgd.block_bitmap * block_size;
+    const r_len = try bdev.read(off, buf);
+    std.debug.assert(r_len == buf.len);
+    var bs = bitset.bitSetFrom(buf);
+    const free = bitset.findFirstUnSet(&bs) orelse return error.NoFreeBlock;
+    bs.set(free);
+    _=try bdev.write(off, buf); // update inode bitmap
+    bgd.free_blocks_count -= 1;
+    try writeBlockGroupDesc(g, &bgd);
+    super_block.free_blocks_count -= 1;
+    try writeSuperBlock(&super_block);
+    const blk_num = free + g * super_block.blocks_per_group;
+    return BlockAlloc{.group = bgd, .blk_num = @truncate(blk_num)};
+
 }
 
 const allocator = @import("../../mem.zig").allocator;
@@ -531,7 +942,7 @@ fn readDirEntries(inode: *const INode, poff:*u64, d:*fs.DEntry, len:u64) !i64 {
     const sblk = off / block_size;
     const blk_off = off % block_size;
 
-    const bkn = try allocator.alloc(u64, eblk - sblk);
+    const bkn = try allocator.alloc(u32, eblk - sblk);
     defer allocator.free(bkn);
     try getBlockNumRange(inode, sblk, eblk, bkn);
 
@@ -558,10 +969,6 @@ fn readDirEntries(inode: *const INode, poff:*u64, d:*fs.DEntry, len:u64) !i64 {
             if (@as(u64, @intFromPtr(next)) > @as(u64, @intFromPtr(dend))) break :outer;
             pos += entry.rec_len;
             r_off += entry.rec_len;
-            //if (std.mem.eql(u8, name, ".")
-            //    or std.mem.eql(u8, name, "..")) {
-            //    continue;
-            //}
             const namep:[*]u8 = @ptrCast(&dp.d_name);
             @memcpy(namep, name);
             namep[name.len] = 0;

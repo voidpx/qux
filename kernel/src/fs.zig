@@ -83,8 +83,8 @@ pub const FileType = enum(u8) {
 };
 
 pub const FsOp = struct {
-    lookup:*const fn(fs:*MountedFs, path:[]const u8, flags:u32) anyerror!Path,
-    lookupAt: *const fn(_:*MountedFs, dir:Path, name:[]const u8, flags:u32) anyerror!Path,
+    lookup:*const fn(fs:*MountedFs, path:[]const u8, flags:u32, mode:u32) anyerror!Path,
+    lookupAt: *const fn(_:*MountedFs, dir:Path, name:[]const u8, flags:u32, mode:u32) anyerror!Path,
     free_path:*const fn(fs:*MountedFs, path:Path) void,
     copy_path:*const fn(fs:*MountedFs, path:Path) anyerror!Path,
     stat:*const fn(fs:*MountedFs, path:Path, stat:*Stat) anyerror!i64
@@ -201,7 +201,7 @@ pub export fn sysNewFStatAt(dfd:i32, name: [*:0]const u8, st:*Stat, flags:u32) c
     } else {
         dir = (task.getCurrentTask().fs.open_files.items[@intCast(dfd)] orelse return -1).path;
     }
-    const p = mounted_fs.ops.lookupAt(mounted_fs, dir, name[0..len], flags) catch {
+    const p = mounted_fs.ops.lookupAt(mounted_fs, dir, name[0..len], flags, 0) catch {
         return -syscall.ENOENT; // NOENT
     };
     defer mounted_fs.ops.free_path(mounted_fs, p);
@@ -210,7 +210,7 @@ pub export fn sysNewFStatAt(dfd:i32, name: [*:0]const u8, st:*Stat, flags:u32) c
 
 pub export fn sysStat(path: [*:0]const u8, st:*Stat) callconv(std.builtin.CallingConvention.SysV) i64 {
     const len = std.mem.len(path);
-    const p = mounted_fs.ops.lookup(mounted_fs, path[0..len], 0) catch {
+    const p = mounted_fs.ops.lookup(mounted_fs, path[0..len], 0, 0) catch {
         return -syscall.ENOENT; // NOENT
     };
     defer mounted_fs.ops.free_path(mounted_fs, p);
@@ -341,7 +341,7 @@ pub var fb_file:*File = undefined;
 
 pub export fn sysChDir(path: [*:0]const u8) callconv(std.builtin.CallingConvention.SysV) i64 {
     const len = std.mem.len(path);
-    const fp = mounted_fs.ops.lookup(mounted_fs, path[0..len], 0) 
+    const fp = mounted_fs.ops.lookup(mounted_fs, path[0..len], 0, 0) 
         catch return -syscall.ENOENT;
     const t = task.getCurrentTask();
     const old = t.fs.cwd.?;
@@ -389,7 +389,7 @@ pub fn openAt(dfd:i32, path: [*:0]const u8, flags:u32) !*File {
     } else {
         dir = (task.getCurrentTask().fs.open_files.items[@intCast(dfd)] orelse return error.InvalidFd).path;
     }
-    const p = mounted_fs.ops.lookupAt(mounted_fs, dir, path[0..len], flags) catch {
+    const p = mounted_fs.ops.lookupAt(mounted_fs, dir, path[0..len], flags, 0) catch {
         return error.FileNotFound; // NOENT
     };
     const file = File.get_new(p, p.fs.fops) catch |err| {
@@ -404,7 +404,7 @@ pub fn openAt(dfd:i32, path: [*:0]const u8, flags:u32) !*File {
 }
 pub fn open(path: [*:0]const u8, flags:u32) !*File {
     const len = std.mem.len(path);
-    const f = try mounted_fs.ops.lookup(mounted_fs, path[0..len], flags);
+    const f = try mounted_fs.ops.lookup(mounted_fs, path[0..len], flags, 0);
     const file = File.get_new(f, f.fs.fops) catch |err| {
         f.fs.ops.free_path(f.fs, f);
         return err;
