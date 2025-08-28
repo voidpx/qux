@@ -18,7 +18,7 @@ Qux is a toy operating system for x64 written in zig.
 - [x] basic memory management
 - [x] basic process management/scheduling
 - [x] basic ATA driver
-- [x] ext2 file system, read only so far
+- [x] ext2 file system
 - [x] syscalls, trying to implement Linux syscalls, so that userspace programs for Linux could hopefully run on Qux 
 - [x] basic ELF loader
 - [x] use dash (recompiled with musl-gcc as static executable) as the shell
