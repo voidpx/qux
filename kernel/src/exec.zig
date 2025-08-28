@@ -99,7 +99,7 @@ fn copyArgsAndEnv(dst:*[mem.page_size]u8, dst_ptr:*[mem.page_size/@sizeOf(u64)]u
 pub fn exec(file: [*:0]const u8, args:?[*:null]?[*:0]const u8, env:?[*:null]?[*:0]const u8) !void {
     const l = lock.cli();
     defer lock.sti(l);
-    const f = try fs.open(file, 0);
+    const f = try fs.open(file, 0, 0);
     defer f.put();
     if (f.getType() != .FILE) {
         return error.NotExecutable;

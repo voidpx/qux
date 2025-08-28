@@ -66,6 +66,19 @@ pub const Path = struct {
         this.entry = d;
         return this;
     }
+
+    pub fn getParent(this:*const @This()) !Path {
+        if (this.entry.prev) |_| {
+            var cp = try this.copy();
+            var last = cp.entry;
+            cp.entry = cp.entry.prev.?;
+            cp.entry.next = null;
+            last.prev = null;
+            this.fs.ops.free_path(this.fs, .{.fs = this.fs, .entry = last});
+            return cp;
+        }
+        return try this.fs.root.copy();
+    }
 };
 
 pub const DirEntry = struct {
@@ -83,11 +96,14 @@ pub const FileType = enum(u8) {
 };
 
 pub const FsOp = struct {
-    lookup:*const fn(fs:*MountedFs, path:[]const u8, flags:u32, mode:u32) anyerror!Path,
-    lookupAt: *const fn(_:*MountedFs, dir:Path, name:[]const u8, flags:u32, mode:u32) anyerror!Path,
+    lookup:*const fn(fs:*MountedFs, path:[]const u8, flags:u32, mode:u16) anyerror!Path,
+    lookupAt: *const fn(_:*MountedFs, dir:Path, name:[]const u8, flags:u32, mode:u16) anyerror!Path,
     free_path:*const fn(fs:*MountedFs, path:Path) void,
     copy_path:*const fn(fs:*MountedFs, path:Path) anyerror!Path,
-    stat:*const fn(fs:*MountedFs, path:Path, stat:*Stat) anyerror!i64
+    stat:*const fn(fs:*MountedFs, path:Path, stat:*Stat) anyerror!i64,
+    mkdir:*const fn(fs:*MountedFs, dir:Path, name:[]const u8, mode:u16) anyerror!void = undefined,
+    rmdir:*const fn(fs:*MountedFs, path:[]const u8) anyerror!void = undefined,
+    unlink:*const fn(fs:*MountedFs, dir:Path, name:[]const u8) anyerror!void = undefined,
 };
 
 pub const FileOps = struct {
@@ -140,6 +156,7 @@ pub var mounted_fs:*MountedFs = undefined;
 
 pub fn init() void {
     syscall.registerSysCall(syscall.SysCallNo.sys_open, &sysOpen);
+    syscall.registerSysCall(syscall.SysCallNo.sys_access, &sysAccess);
     syscall.registerSysCall(syscall.SysCallNo.sys_close, &sysClose);
     syscall.registerSysCall(syscall.SysCallNo.sys_read, &sysRead);
     syscall.registerSysCall(syscall.SysCallNo.sys_readv, &sysReadV);
@@ -150,6 +167,8 @@ pub fn init() void {
     syscall.registerSysCall(syscall.SysCallNo.sys_ioctl, &sysIoCtl);
     syscall.registerSysCall(syscall.SysCallNo.sys_writev, &sysWriteV);
     syscall.registerSysCall(syscall.SysCallNo.sys_mkdir, &sysMkDir);
+    syscall.registerSysCall(syscall.SysCallNo.sys_rmdir, &sysRmDir);
+    syscall.registerSysCall(syscall.SysCallNo.sys_unlink, &sysUnlink);
     syscall.registerSysCall(syscall.SysCallNo.sys_newstat, &sysStat);
     syscall.registerSysCall(syscall.SysCallNo.sys_lseek, &sysLSeek);
     syscall.registerSysCall(syscall.SysCallNo.sys_fcntl, &sysFCntl);
@@ -181,10 +200,67 @@ pub export fn sysReadLinkAt(dirfd:i32, path: [*:0]const u8, buf:[*]u8, bufsiz:us
     return -1;
 }
 
-pub export fn sysMkDir(path: [*:0]const u8, mode:u16) callconv(std.builtin.CallingConvention.SysV) i64 {
-    console.print("mkdir: {s}\n", .{path[0..std.mem.len(path)]});
-    _=&mode;
+pub export fn sysRmDir(path: [*:0]const u8) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const len = std.mem.len(path);
+    mounted_fs.ops.rmdir(mounted_fs, path[0..len]) catch return -1;
     return 0;
+}
+
+pub export fn sysUnlink(path: [*:0]const u8) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const len = std.mem.len(path);
+    var it = std.mem.splitSequence(u8, path[0..len], "/");
+    var last:?[]const u8 = null;
+    while (it.next()) |e| {
+        if (e.len == 0) continue;
+        last = e;
+    }
+    if (last) |e| {
+        const dir = path[0..len - e.len]; 
+        if (dir.len > 0) {
+            const at = mounted_fs.ops.lookup(mounted_fs, dir, 0, 0) catch return -1;
+            defer mounted_fs.ops.free_path(mounted_fs, at);
+            mounted_fs.ops.unlink(mounted_fs, at, e) catch return -1;
+        } else {
+            const cwd = task.getCurrentTask().fs.cwd orelse return -1;
+            mounted_fs.ops.unlink(mounted_fs, cwd, e) catch return -1;
+        }
+    } else {
+        return -1;
+    }
+    return 0;
+}
+
+pub export fn sysMkDir(path: [*:0]const u8, mode:u16) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const len = std.mem.len(path);
+    var it = std.mem.splitSequence(u8, path[0..len], "/");
+    var last:?[]const u8 = null;
+    while (it.next()) |e| {
+        if (e.len == 0) continue;
+        last = e;
+    }
+    if (last) |e| {
+        const dir = path[0..len - e.len]; 
+        if (dir.len > 0) {
+            const at = mounted_fs.ops.lookup(mounted_fs, dir, 0, 0) catch return -1;
+            defer mounted_fs.ops.free_path(mounted_fs, at);
+            return mkDirAt(at, e, mode);
+        } else {
+            const cwd = task.getCurrentTask().fs.cwd orelse return -1;
+            return mkDirAt(cwd, e, mode);
+        }
+    } else {
+        return -1;
+    }
+    return 0;
+}
+
+fn mkDirAt(dir:Path, name:[]const u8, mode:u16) i64 {
+    const p = mounted_fs.ops.lookupAt(mounted_fs, dir, name, 0, 0) catch {
+        mounted_fs.ops.mkdir(mounted_fs, dir, name, mode) catch return -1;
+        return 0;
+    };
+    mounted_fs.ops.free_path(mounted_fs, p);
+    return -syscall.EEXIST;
 }
 
 const AT_FDCWD = -100;
@@ -364,6 +440,13 @@ pub export fn sysOpenAt(dfd:i32, path: [*:0]const u8, flags:u32, mode:u16) callc
 
 }
 
+pub export fn sysAccess(path: [*:0]const u8, mode:u16) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const len = std.mem.len(path);
+    const f = mounted_fs.ops.lookup(mounted_fs, path[0..len], 0, mode) catch return -1;
+    mounted_fs.ops.free_path(mounted_fs, f);
+    return 0;
+}
+
 pub export fn sysOpen(path: [*:0]const u8, flags:u32, mode:u16) callconv(std.builtin.CallingConvention.SysV) i64 {
     _=&mode;
     const t = task.getCurrentTask();
@@ -374,7 +457,7 @@ pub export fn sysOpen(path: [*:0]const u8, flags:u32, mode:u16) callconv(std.bui
          t.fs.installFd(fd, fb_file);
         return @intCast(fd);
     }
-    const file = open(path, flags) catch return -1;
+    const file = open(path, flags, mode) catch return -1;
     t.fs.installFd(fd, file);
     return @intCast(fd);
 
@@ -402,9 +485,9 @@ pub fn openAt(dfd:i32, path: [*:0]const u8, flags:u32) !*File {
     }
     return file;
 }
-pub fn open(path: [*:0]const u8, flags:u32) !*File {
+pub fn open(path: [*:0]const u8, flags:u32, mode:u16) !*File {
     const len = std.mem.len(path);
-    const f = try mounted_fs.ops.lookup(mounted_fs, path[0..len], flags, 0);
+    const f = try mounted_fs.ops.lookup(mounted_fs, path[0..len], flags, mode);
     const file = File.get_new(f, f.fs.fops) catch |err| {
         f.fs.ops.free_path(f.fs, f);
         return err;
