@@ -202,16 +202,6 @@ fn lookupDEntry(d:*fs.DirEntry, name:[]const u8, flags:u32, mode:u16) !*fs.DirEn
     if (!inode.isDir()) {
         return error.FileNotFound;
     }
-    //var n_ino:?u32 = null;
-    //if (std.mem.eql(u8, n, ".")) n_ino = dir.dentry.inode;
-    //if (std.mem.eql(u8, n, "..")) {
-    //    if (d.prev) |p| {
-    //        const dp:*DirEntObj = @alignCast(@ptrCast(p.priv));
-    //        n_ino = dp.dentry.inode;
-    //    } else {
-    //        n_ino = dir.dentry.inode;
-    //    }
-    //}
     var f_type:EntType = .EXT2_FT_REG_FILE;
     if (mode & s_ifdir > 0) {
         f_type = .EXT2_FT_DIR;
@@ -383,6 +373,7 @@ fn appendBlocks(n:*INode, ino:u32, blk_idx:u32, blks:u32, bkn:[]u32) !void {
             continue;
         }
     }
+    n.blocks += (blks * block_size) >> 9;
     try writeINode(ino, n);
 }
 
@@ -881,6 +872,7 @@ fn createDirEntry(dir:*INode, ino:u32, block:[]u8, insert_blk:u32, insert_off:u3
         entry = @ptrCast(buf.ptr);
         entry.rec_len = @truncate(block_size);
         dir.size += block_size;
+        dir.blocks += block_size >> 9;
         try writeINode(ino, dir);
     } else {
         entry = @ptrCast(&buf[insert_off]);
