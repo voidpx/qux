@@ -117,7 +117,11 @@ const console = @import("console.zig");
 pub export fn sysRtSigSuspend(sigset:?*anyopaque, sigsetsize:usize) callconv(std.builtin.CallingConvention.SysV) i64 {
     _=&sigset;
     _=&sigsetsize;
-    return 0;
+    const t = task.getCurrentTask();
+    while (t.signal.sig == 0) {
+        task.schedule();
+    }
+    return -514;
 }
 
 pub const SigAction = struct {

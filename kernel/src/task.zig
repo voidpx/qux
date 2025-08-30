@@ -490,7 +490,7 @@ pub fn init() void {
     //XXX: special handling for std in/out/err
 }
 
-pub export fn sysWait4(pid:i32, status:*i32, option:i32, ru:?*anyopaque) callconv(std.builtin.CallingConvention.SysV) i64 {
+pub export fn sysWait4(pid:i32, status:?*i32, option:i32, ru:?*anyopaque) callconv(std.builtin.CallingConvention.SysV) i64 {
     const l = lock.cli();
     defer lock.sti(l);
     var t:*Task = undefined;
@@ -504,10 +504,12 @@ pub export fn sysWait4(pid:i32, status:*i32, option:i32, ru:?*anyopaque) callcon
     } else {
         t = getTask(@intCast(pid)) orelse return -1;
     }
-    _=&status;
     _=&option;
     _=&ru;
-    _ = t.wait();
+    const code = t.wait();
+    if (status) |s| {
+        s.* = code;
+    }
     return t.id;
 }
 

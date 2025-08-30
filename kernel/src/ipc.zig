@@ -80,7 +80,7 @@ fn finalize(file:*fs.File) anyerror!void {
     } else {
         p.closeWrite();
     }
-    console.print("put pipe 0x{x}, refcount: {}\n", .{@as(u64, @intFromPtr(p)), obj.getRefCount(p)});
+    //console.print("put pipe 0x{x}, refcount: {}\n", .{@as(u64, @intFromPtr(p)), obj.getRefCount(p)});
     obj.put(p);
 }
 
