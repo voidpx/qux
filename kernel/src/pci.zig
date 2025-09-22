@@ -28,13 +28,20 @@ pub const PciDev = packed struct {
         writeConfig(dev.bus, dev.slot, dev.function, 4, cmd);
     }
 
+    pub fn getIrq(dev:*const @This()) u8 {
+        const reg = readConfig(dev.bus, dev.slot, dev.function, 0xf << 2, u32);
+        const irq = @as(u8, @truncate(reg));
+        std.debug.assert(irq < 16); 
+        return irq;
+    }
+
     pub fn getBar(dev:*const @This()) [6]?Bar {
         var ret = [_]?Bar{null} ** 6;
         for (0..6) |i| {
             const offset = 0x10 + i*4;
             const bar = readConfig(dev.bus, dev.slot, dev.function, @intCast(offset), u32);
             if (bar & 1 > 0) {
-                //console.print("IO BAR: 0x{x}\n", .{bar});
+                console.print("IO BAR: 0x{x}\n", .{bar});
             } else if (bar > 0) {
                 if (bar & 6 == 4) {
                     console.print("64bit BAR: 0x{x}\n", .{bar});
@@ -44,7 +51,7 @@ pub const PciDev = packed struct {
                 writeConfig(dev.bus, dev.slot, dev.function, @intCast(offset), bar);
                 mask &= ~@as(u32, 0xf);
                 const len = if (mask == 0) 0 else ~mask + 1;
-                //console.print("MMIO BAR: 0x{x}, len: 0x{x}\n", .{bar, len});
+                console.print("MMIO BAR: 0x{x}, len: 0x{x}\n", .{bar, len});
                 const vaddr = mem.virtualAddr(bar);
                 mem.kernelMapVm(vaddr, vaddr + len, bar >> mem.page_shift) catch unreachable;
                 ret[i] = Bar{.type = .MMIO, .addr = vaddr, .len = len};

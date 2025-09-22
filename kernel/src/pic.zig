@@ -15,8 +15,8 @@ const ICW4_AUTO:u8	=0x02;
 const ICW4_BUF_SLAVE:u8	=0x08;	
 const ICW4_BUF_MASTER:u8	=0x0C;	
 const ICW4_SFNM:u8	=0x10;
-const OFFSET1:u8 = 0x20;
-const OFFSET2:u8 = 0x28;
+pub const OFFSET1:u8 = 0x20;
+pub const OFFSET2:u8 = 0x28;
 
 pub fn sendEOI(irq:u8) void {
     if(irq >= 8) {
@@ -53,11 +53,11 @@ fn remap(offset1:u8, offset2:u8) void {
 	io.out(PIC2_DATA, @as(u8, 0xff));
 }
 
-pub fn enable(irq:u3) void {
+pub fn enable(irq:u8) void {
     var r = irq;
     const port = if (r >= 8) blk: {r = r - 8; break: blk PIC2_DATA;} else PIC1_DATA;
     var a:u8 = io.in(u8, port);
-    a &= ~(@as(u8, 1)<<r);
+    a &= ~(@as(u8, 1)<<@as(u3, @truncate(r)));
     io.out(port, a);
 }
 

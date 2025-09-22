@@ -1,4 +1,4 @@
-pub const tick_hz:u32 = 100;
+pub const tick_hz:u32 = 1000;
 const pit_hz:u32 = 1193182;
 const latch:u16 = @truncate((pit_hz + tick_hz/2)/tick_hz);
 

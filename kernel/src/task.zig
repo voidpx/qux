@@ -541,7 +541,7 @@ pub export fn sysFork() callconv(std.builtin.CallingConvention.SysV) i64 {
     //console.print("fork", .{});
     const ca = CloneArgs{
     };
-    const pid = clone(&ca) catch return -1;
+    const pid = (clone(&ca) catch return -1).id;
     //console.print("fork {}\n", .{pid});
     return pid;
 }
@@ -556,7 +556,7 @@ pub export fn sysClone(flags:u64, sp:u64, ptid:?*u32, ctid:?*u32, tls:u64) callc
         .ustack = sp,
         .flags = flags
     };
-    const pid = clone(&ca) catch return -1;
+    const pid = (clone(&ca) catch return -1).id;
     return pid;
 }
 
@@ -1074,14 +1074,14 @@ fn setupTask(a:*const CloneArgs, task:*Task, cur:*Task) !void {
 }
 
 var task_id:u32 = 1;
-pub fn clone(a: *const CloneArgs) !u32 {
+pub fn clone(a: *const CloneArgs) !*Task {
     const v = lock.cli();
     defer lock.sti(v);
     const cur = getCurrentTask();
     const task = try dupTask(cur);
     try setupTask(a, task, cur);
     addToRunQueue(task);
-    return task.id;
+    return task;
 
 }
 

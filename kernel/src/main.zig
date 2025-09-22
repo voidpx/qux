@@ -60,13 +60,21 @@ export fn startKernel(b: *bi.BootInfo) callconv(std.builtin.CallingConvention.Sy
 
     kthread.createKThread("timer", &time.timerRoutine, null);
     task.startSchedRoutine();
-
+    netInit();
     //XXX: debug mem
     //kthread.createKThread("mem-watch", &printMemStat, null);
 
     //kthread.createKThread("loop", &loop, null);
 
     idleLoop();
+}
+
+fn netInit() void {
+    @import("net/net.zig").init();
+    @import("net/ip.zig").init();
+    @import("net/arp.zig").init();
+    @import("net/icmp.zig").init();
+    @import("net/udp.zig").init();
 }
 
 const flags = @import("flags.zig");
