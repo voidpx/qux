@@ -2,8 +2,23 @@ const alloc = @import("../mem.zig").allocator;
 const task = @import("../task.zig");
 const std = @import("std");
 
-// dummy config:
-pub const ip_addr = [_]u8{192, 168, 1, 2};
+
+pub const Sock = struct {
+    priv:?*anyopaque = null,
+    rq:PacketQueue,
+    wq:PacketQueue,
+    src_addr:?SockAddr,
+    dst_addr:?SockAddr,
+    
+};
+
+const MIN_SA_LEN = 16;
+pub const SockAddr = struct {
+    family:u16,
+    port:u16,
+    addr:u32,
+    pad:[MIN_SA_LEN - @offsetOf(SockAddr, "pad")]u8 = .{0},
+};
 
 pub const NetDev = struct {
     priv:?*anyopaque = null,
@@ -153,6 +168,12 @@ pub const IpV4Hdr = extern struct {
     pub fn setDstAddr(self:*@This(), addr:u32) void {
         self.dst_addr = @byteSwap(addr);
     }
+    pub fn setTotalLen(self:*@This(), len:u16) void {
+        self.total_len = @byteSwap(len);
+    }
+    pub fn setSum(self:*@This(), sum:u16) void {
+        self.csum = @byteSwap(sum);
+    }
 };
 
 pub const NetReceiver = struct {
@@ -199,6 +220,12 @@ pub const Packet = extern struct {
     pub fn getIpV4Hdr(self:*@This()) *IpV4Hdr {
         const ip = self.getNetPacket();
         return @ptrCast(ip.ptr);
+    }
+
+    pub fn getTransPacket(self:*@This()) []u8 {
+        const p = self.getNetPacket();
+        const pt:[*]u8 = @ptrCast(p.ptr);
+        return (pt + @sizeOf(IpV4Hdr))[0..p.len-@sizeOf(IpV4Hdr)];
     }
     
     pub fn getNetProto(self:*@This()) NetProto {

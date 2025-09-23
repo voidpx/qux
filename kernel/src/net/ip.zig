@@ -91,13 +91,17 @@ test "sum" {
     try std.testing.expect(sum == 0xd0ac);
 }
 
-pub fn ipSend(pkt:*net.Packet, callback:?*const fn(pkt:*net.Packet) void) !void {
+pub fn ipSend(pkt:*net.Packet, calc_sum:?*const fn(p_sum:u16, pkt:*net.Packet) void) !void {
     const hdr = pkt.getIpV4Hdr();
     pkt.setNetProto(net.NetProto.IPV4);
     hdr.setSrcAddr(@byteSwap(net.net_dev.ipv4_addr));
     hdr.csum = 0;
     hdr.csum = @byteSwap(ipHdrSum(hdr));
-    if (callback) |c| c(pkt);
+    var pseudo_sum = calcSum(@as([*]u8, @ptrCast(&hdr.src_addr))[0..@sizeOf(@TypeOf(hdr.src_addr))]); 
+    pseudo_sum = addToSum(pseudo_sum, @as([*]u8, @ptrCast(&hdr.dst_addr))[0..@sizeOf(@TypeOf(hdr.dst_addr))]); 
+    pseudo_sum = addToSumU16(pseudo_sum, @as(u16, hdr.proto));
+    pseudo_sum = addToSumU16(pseudo_sum, @intCast(pkt.getTransPacket().len));
+    if (calc_sum) |c| c(pseudo_sum, pkt);
     try net.xmitPacket(pkt);
 }
 

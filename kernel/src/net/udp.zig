@@ -14,16 +14,12 @@ pub fn init() void {
     ip.registerTransProto(net.TransProto.UDP, &nr) catch unreachable; 
 }
 
-fn calcUdpSum(pkt:*net.Packet) void {
-    const iphdr:*net.IpV4Hdr = pkt.getIpV4Hdr();
-    const uhdr:*UdpHdr = @ptrCast(@as([*]u8, @ptrCast(iphdr)) + @sizeOf(net.IpV4Hdr));
+fn calcUdpSum(p_sum:u16, pkt:*net.Packet) void {
+    const data = pkt.getTransPacket();
+    const uhdr:*UdpHdr = @ptrCast(data.ptr);
     uhdr.csum = 0;
-    const len = @byteSwap(uhdr.length);
-    var sum = ip.calcSum(@as([*]u8, @ptrCast(uhdr))[0..len]);
-    sum = ip.addToSum(sum, @as([*]u8, @ptrCast(&iphdr.src_addr))[0..@sizeOf(@TypeOf(iphdr.src_addr))]); 
-    sum = ip.addToSum(sum, @as([*]u8, @ptrCast(&iphdr.dst_addr))[0..@sizeOf(@TypeOf(iphdr.dst_addr))]); 
-    sum = ip.addToSumU16(sum, @as(u16, iphdr.proto));
-    sum = ip.addToSumU16(sum, len);
+    var sum = ip.calcSum(data);
+    sum = ip.addToSumU16(sum, ~p_sum);
     uhdr.csum = @byteSwap(sum);
 }
 

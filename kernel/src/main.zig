@@ -75,6 +75,7 @@ fn netInit() void {
     @import("net/arp.zig").init();
     @import("net/icmp.zig").init();
     @import("net/udp.zig").init();
+    @import("net/tcp.zig").init();
 }
 
 const flags = @import("flags.zig");
