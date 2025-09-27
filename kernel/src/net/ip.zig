@@ -94,9 +94,11 @@ test "sum" {
 pub fn ipSend(pkt:*net.Packet, calc_sum:?*const fn(p_sum:u16, pkt:*net.Packet) void) !void {
     const hdr = pkt.getIpV4Hdr();
     pkt.setNetProto(net.NetProto.IPV4);
+    const tlen = pkt.getNetPacket().len;
+    hdr.setTotalLen(@intCast(tlen));
     hdr.setSrcAddr(@byteSwap(net.net_dev.ipv4_addr));
-    hdr.csum = 0;
-    hdr.csum = @byteSwap(ipHdrSum(hdr));
+    hdr.setSum(0);
+    hdr.setSum(ipHdrSum(hdr));
     var pseudo_sum = calcSum(@as([*]u8, @ptrCast(&hdr.src_addr))[0..@sizeOf(@TypeOf(hdr.src_addr))]); 
     pseudo_sum = addToSum(pseudo_sum, @as([*]u8, @ptrCast(&hdr.dst_addr))[0..@sizeOf(@TypeOf(hdr.dst_addr))]); 
     pseudo_sum = addToSumU16(pseudo_sum, @as(u16, hdr.proto));

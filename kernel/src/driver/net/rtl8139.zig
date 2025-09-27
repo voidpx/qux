@@ -141,7 +141,7 @@ fn _write(pkt:*net.Packet) !void {
             writeReg(sp, status);
             status = readReg(sp, u32);
 
-            console.print("status after write:0x{x}\n", .{status});
+            //console.print("status after write:0x{x}\n", .{status});
 
             return;
         }

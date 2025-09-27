@@ -351,6 +351,7 @@ pub const Task = struct {
     threads:TaskList = .{},
     thread_link:TaskList.Node = undefined,
     exit_listeners: TaskListenerList = .{},
+    on_wq:?struct {q:*WaitQueue, n:*WaitQueue.Node} = null,
 
     pub fn registerExitListener(t:*@This(), l:*TaskListener) void {
         const f = lock.cli();
@@ -420,6 +421,7 @@ pub const Task = struct {
         while (this.state != .dead) {
             this.exit_wq.append(&node);
             t.state = .blocked;
+            t.on_wq = .{.q = &this.exit_wq, .n = &node};
             scheduleWithIF();
             // XXX: remove t from the wait queue if it wasn't woken up by child exit ??
             //wqRemove(&this.exit_wq, &node);
@@ -943,6 +945,12 @@ pub fn wakeupTask(t:*Task) void {
 }
 
 fn wakeupTaskUnlocked(t:*Task) void {
+    if (t.on_wq) |q| {
+        q.q.remove(q.n);
+        q.n.prev = null;
+        q.n.next = null;
+        t.on_wq = null;
+    }
     if (t.state != .dead and t.state != .runnable) {
         t.sched.share = if (runq.peek()) |s| s.sched.share  else 0;
         addToRunQueue(t);
@@ -955,6 +963,7 @@ pub fn wait(wq: *WaitQueue) void {
     const t = getCurrentTask();
     t.state = .blocked;
     var node = WaitQueue.Node{.data = t};
+    t.on_wq = .{.q = wq, .n = &node};
     wq.append(&node);
     scheduleWithIF();
 }
@@ -964,6 +973,7 @@ pub fn wakeup(wq:*WaitQueue) void {
     defer lock.sti(v);
     while (wqPop(wq)) |n| {
         const t = n.data;
+        t.on_wq = null;
         wakeupTaskUnlocked(t);
     }
 }

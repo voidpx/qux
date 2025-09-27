@@ -10,6 +10,8 @@ const UdpHdr = extern struct {
     csum:u16 align(1),
 };
 
+const SockMap = std.AutoHashMap(net.SockAddr, *net.Sock);
+
 pub fn init() void {
     ip.registerTransProto(net.TransProto.UDP, &nr) catch unreachable; 
 }

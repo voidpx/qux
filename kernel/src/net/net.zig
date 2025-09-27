@@ -1,23 +1,40 @@
 const alloc = @import("../mem.zig").allocator;
 const task = @import("../task.zig");
 const std = @import("std");
+const syscall = @import("../syscall.zig");
+const fs = @import("../fs.zig");
 
+const SockMap = std.AutoHashMap(Proto, *const ProtoFamily);
+var sock_map:SockMap = undefined;
 
 pub const Sock = struct {
     priv:?*anyopaque = null,
-    rq:PacketQueue,
-    wq:PacketQueue,
-    src_addr:?SockAddr,
-    dst_addr:?SockAddr,
+    rq:PacketQueue = .{},
+    wq:PacketQueue = .{},
+    rwq:task.WaitQueue = .{},
+    wwq:task.WaitQueue = .{},
+    src_addr:?SockAddr = null,
+    dst_addr:?SockAddr = null,
+    ops:*const SockOps = undefined,
+
     
 };
 
-const MIN_SA_LEN = 16;
-pub const SockAddr = struct {
-    family:u16,
-    port:u16,
-    addr:u32,
-    pad:[MIN_SA_LEN - @offsetOf(SockAddr, "pad")]u8 = .{0},
+pub const Proto = enum (u8) {
+    SOCK_STREAM = 1,
+    SOCK_DGRAM = 2,
+};
+
+pub const SockAddr = extern struct {
+    family:u16 = 0,
+    port:u16 = 0,
+    addr:u32 = 0,
+    pad:[8]u8 = [_]u8{0}**8,
+};
+
+pub const SockAddrPair = struct {
+    src:SockAddr = .{},
+    dst:SockAddr = .{}
 };
 
 pub const NetDev = struct {
@@ -35,9 +52,10 @@ pub const NetDevOps = struct {
 pub var net_dev:*NetDev = undefined;
 
 //const packets:PacketQueue = .{};
-const PacketQueue = struct {
+pub const PacketQueue = struct {
     head:?*Packet = null,
     tail:?*Packet = null,
+    read_pos:usize = 0,
     count:u32 = 0,
     pub fn getCount(self:*@This()) u32 {
         return self.count;
@@ -64,17 +82,17 @@ const PacketQueue = struct {
     }
 };
 
-pub const ProtoSock = struct {
-    new_sock:*const fn() anyerror!*Socket,
-    send:*const fn(sk:*Socket, buf:[]u8) anyerror!usize,
-    recv:*const fn(sk:*Socket, buf:[]u8) anyerror!void,
+pub const ProtoFamily = struct {
+    new_sock:*const fn() anyerror!*Sock,
+    
 };
-
-pub const Socket = struct {
-    priv:?*anyopaque = null,
-    q:PacketQueue = .{},
-    wq:task.WaitQueue = .{},
-
+pub const SockOps = struct {
+    listen:*const fn(sk:*Sock) anyerror!void,
+    connect:*const fn(sk:*Sock, addr:*SockAddr) anyerror!void,
+    bind:*const fn(sk:*Sock, addr:*SockAddr) anyerror!void,
+    send:*const fn(sk:*Sock, buf:[]const u8) anyerror!usize,
+    recv:*const fn(sk:*Sock, buf:[]u8) anyerror![]u8,
+    free_sk:*const fn(sk:*Sock) void,
 };
 
 pub const TransProto = enum (u8) {
@@ -130,7 +148,7 @@ pub const IpV4Hdr = extern struct {
     }
     
     pub fn getIHL(self:*@This()) u8 {
-        return self.ver_ihl & 0xf;
+        return (self.ver_ihl & 0xf) * 4;
     }
 
     pub fn getTotalLen(self:*@This()) u16 {
@@ -173,6 +191,9 @@ pub const IpV4Hdr = extern struct {
     }
     pub fn setSum(self:*@This(), sum:u16) void {
         self.csum = @byteSwap(sum);
+    }
+    pub fn setIHL(self:*@This(), ihl:u8) void {
+        self.ver_ihl = (self.ver_ihl & ~@as(u8, 0xf)) | ((ihl)/4 & 0xf);
     }
 };
 
@@ -224,8 +245,11 @@ pub const Packet = extern struct {
 
     pub fn getTransPacket(self:*@This()) []u8 {
         const p = self.getNetPacket();
+        const iph = self.getIpV4Hdr();
         const pt:[*]u8 = @ptrCast(p.ptr);
-        return (pt + @sizeOf(IpV4Hdr))[0..p.len-@sizeOf(IpV4Hdr)];
+        const ihl = iph.getIHL();
+        const tlen = iph.getTotalLen();
+        return (pt + ihl)[0..tlen - ihl];
     }
     
     pub fn getNetProto(self:*@This()) NetProto {
@@ -272,6 +296,10 @@ pub fn registerNetDev(dev:*NetDev) void {
     net_dev = dev;
 }
 
+pub fn registerProtoFamily(p: Proto, nf:*const ProtoFamily) !void {
+    try sock_map.put(p, nf);
+}
+
 fn receive_pkt(a:?*anyopaque) u16 {
     _=&a;
     while (true) {
@@ -293,8 +321,8 @@ fn receive_pkt(a:?*anyopaque) u16 {
             printPacket(p);
             continue;
         };
-        r.recv(r, p) catch {
-            console.print("error receiving packet, proto: 0x{x}", .{@intFromEnum(p.getNetProto())});
+        r.recv(r, p) catch |e| {
+            console.print("error receiving packet, error:{}", .{e});
             printPacket(p);
         };
     }
@@ -316,9 +344,48 @@ pub fn registerNetProtoHandler(proto:NetProto, h:*const NetReceiver) !void {
     try proto_map.put(proto, @constCast(h));
 }
 
+const kthread = @import("../kthread.zig");
 pub fn init() void {
     proto_map = ProtoMap.init(alloc);
-    const arg:task.CloneArgs = .{.func = &receive_pkt, .name = "pkt_rcv"};
-    _=task.clone(&arg) catch unreachable;
+    sock_map = SockMap.init(alloc);
+
+    kthread.createKThread("pkt_rcv", &receive_pkt, null);
+    
+    syscall.registerSysCall(syscall.SysCallNo.sys_socket, &sysSocket);
+
+}
+
+const sk_fops:fs.FileOps = .{.read = &read, .write = &write, .finalize = &finalize};
+
+fn read(file:*fs.File, buf:[]u8) anyerror![]u8 {
+    const sk:*Sock = @alignCast(@ptrCast(file.ctx.?));
+    return try sk.ops.recv(sk, buf);
+}
+fn write(file:*fs.File, buf:[]const u8) anyerror!usize {
+    const sk:*Sock = @alignCast(@ptrCast(file.ctx.?));
+    return try sk.ops.send(sk, buf);
+}
+    // called right before *File is freed
+fn finalize(file:*fs.File) anyerror!void {
+    const sk:*Sock = @alignCast(@ptrCast(file.ctx.?));
+    sk.ops.free_sk(sk);
+}
+
+
+pub export fn sysSocket(family:u32, ptype:u32, proto:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    _=&family;
+    _=&proto;
+    const t = task.getCurrentTask();
+    const fd = t.fs.getFreeFd() catch return -1;
+    const nf = sock_map.get(@enumFromInt(ptype)) orelse return -1;
+    const sk = nf.new_sock() catch return -1;
+    const file = fs.File.get_new_ex(&sk_fops) catch {
+        sk.ops.free_sk(sk);
+        return -1;
+    };
+    file.ctx = sk;
+    t.fs.installFd(fd, file);
+    return @intCast(fd);
+
 }
 

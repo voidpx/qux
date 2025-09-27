@@ -1,7 +1,8 @@
+const net = @import("net/net.zig");
+const tcp = @import("net/tcp.zig");
+const udp = @import("net/udp.zig");
 
-pub const Socket = struct {
-    
-};
+
 
 pub fn init() void {
 

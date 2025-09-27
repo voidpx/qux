@@ -16,10 +16,6 @@ pub const Panic = @import("panic.zig");
 // XXX: newer version would work without the following line
 pub const panic: fn(msg: []const u8, ert: ?*std.builtin.StackTrace, ra: ?usize) noreturn = Panic.call; 
 
-
-//test
-//const us =@import("userspace.zig");
-
 const syscall = @import("syscall.zig");
 const fs = @import("fs.zig");
 const font = @import("ui/font.zig");
@@ -62,7 +58,7 @@ export fn startKernel(b: *bi.BootInfo) callconv(std.builtin.CallingConvention.Sy
     task.startSchedRoutine();
     netInit();
     //XXX: debug mem
-    //kthread.createKThread("mem-watch", &printMemStat, null);
+    kthread.createKThread("mem-watch", &printMemStat, null);
 
     //kthread.createKThread("loop", &loop, null);
 

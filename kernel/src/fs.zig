@@ -17,6 +17,10 @@ pub const DEntry = extern struct {
     d_name:[0]u8 align(1),
 };
 
+var dummy_fs:MountedFs = .{};
+var dummy_dentry:DirEntry = .{.name = "dummy"};
+var dummy_path:Path = .{.fs = &dummy_fs, .entry = &dummy_dentry};
+
 /// an open file
 pub const File = struct {
     ctx:?*anyopaque = null,
@@ -28,7 +32,15 @@ pub const File = struct {
         if (f.ops.finalize) |fi| {
             fi(f) catch {};
         }
+        if (f.path.fs == &dummy_fs) return;
         f.path.fs.ops.free_path(f.path.fs, f.path);
+    }
+    pub fn get_new_ex(fops:*const FileOps) !*File {
+        const f = try object.new(File, null, &dtor);
+        f.pos = 0;
+        f.path = dummy_path;
+        f.ops = fops;
+        return f;
     }
     pub fn get_new(path:Path, fops:*const FileOps) !*File {
         const f = try object.new(File, null, &dtor);
@@ -109,16 +121,17 @@ pub const FsOp = struct {
 pub const FileOps = struct {
     read:*const fn(file:*File, buf:[]u8) anyerror![]u8,
     write:*const fn(file:*File, buf:[]const u8) anyerror!usize,
+    // called right before *File is freed
     finalize:?*const fn(file:*File) anyerror!void = null,
     ioctl:?*const fn(file:*File, cmd:u32, arg:u64) i64 = null,
     readdir:?*const fn(file:*File, d:*DEntry, len:u64) anyerror!i64 = null,
 };
 
 pub const MountedFs = struct {
-    root:Path, 
-    ctx:?*anyopaque,
-    ops:*const FsOp,
-    fops:*const FileOps,
+    root:Path = undefined, 
+    ctx:?*anyopaque = null,
+    ops:*const FsOp = undefined,
+    fops:*const FileOps = undefined,
 
 };
 pub const Stat = extern struct {

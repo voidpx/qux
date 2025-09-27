@@ -54,7 +54,7 @@ fn arpRecv(nr:*net.NetReceiver, pkt:*net.Packet) !void {
     defer pkt.free();
     const pk = pkt.getNetPacket();
     const ap:*ArpPacket = @ptrCast(@alignCast(pk.ptr));
-    console.print("arp packet received: size:{}\n{s}\n", .{pk.len, std.fmt.fmtSliceHexLower(pk)});
+    //console.print("arp packet received: size:{}\n{s}\n", .{pk.len, std.fmt.fmtSliceHexLower(pk)});
     
     const repp:*net.Packet = try net.Packet.new(60);
     defer repp.free();
