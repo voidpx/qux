@@ -72,6 +72,10 @@ pub const PacketQueue = struct {
         self.tail = p;
         self.count += 1;
     }
+    pub fn peek(self:*@This()) ?*Packet {
+        return self.head orelse return null;
+    }
+
     pub fn dequeue(self:*@This()) ?*Packet {
         const h = self.head orelse return null;
         self.head = h.next;
@@ -87,12 +91,15 @@ pub const ProtoFamily = struct {
     
 };
 pub const SockOps = struct {
+    bind:*const fn(sk:*Sock, addr:*const SockAddr) anyerror!void,
     listen:*const fn(sk:*Sock) anyerror!void,
-    connect:*const fn(sk:*Sock, addr:*SockAddr) anyerror!void,
-    bind:*const fn(sk:*Sock, addr:*SockAddr) anyerror!void,
+    accept:*const fn(sk:*Sock) anyerror!*Sock,
+    connect:*const fn(sk:*Sock, addr:*const SockAddr) anyerror!void,
+    send_to:*const fn(sk:*Sock, buf:[]const u8, addr:?*const SockAddr) anyerror!usize,
     send:*const fn(sk:*Sock, buf:[]const u8) anyerror!usize,
+    recv_from:*const fn(sk:*Sock, buf:[]u8, addr:?*SockAddr) anyerror![]u8,
     recv:*const fn(sk:*Sock, buf:[]u8) anyerror![]u8,
-    free_sk:*const fn(sk:*Sock) void,
+    release:*const fn(sk:*Sock) void,
 };
 
 pub const TransProto = enum (u8) {
@@ -352,6 +359,14 @@ pub fn init() void {
     kthread.createKThread("pkt_rcv", &receive_pkt, null);
     
     syscall.registerSysCall(syscall.SysCallNo.sys_socket, &sysSocket);
+    syscall.registerSysCall(syscall.SysCallNo.sys_bind, &sysBind);
+    syscall.registerSysCall(syscall.SysCallNo.sys_listen, &sysListen);
+    syscall.registerSysCall(syscall.SysCallNo.sys_accept, &sysAccept);
+    syscall.registerSysCall(syscall.SysCallNo.sys_connect, &sysConnect);
+    syscall.registerSysCall(syscall.SysCallNo.sys_recvfrom, &sysRecvFrom);
+    syscall.registerSysCall(syscall.SysCallNo.sys_sendto, &sysSendTo);
+    //syscall.registerSysCall(syscall.SysCallNo.sys_socket, &sysSocket);
+    //syscall.registerSysCall(syscall.SysCallNo.sys_socket, &sysSocket);
 
 }
 
@@ -368,7 +383,7 @@ fn write(file:*fs.File, buf:[]const u8) anyerror!usize {
     // called right before *File is freed
 fn finalize(file:*fs.File) anyerror!void {
     const sk:*Sock = @alignCast(@ptrCast(file.ctx.?));
-    sk.ops.free_sk(sk);
+    sk.ops.release(sk);
 }
 
 
@@ -380,12 +395,80 @@ pub export fn sysSocket(family:u32, ptype:u32, proto:u32) callconv(std.builtin.C
     const nf = sock_map.get(@enumFromInt(ptype)) orelse return -1;
     const sk = nf.new_sock() catch return -1;
     const file = fs.File.get_new_ex(&sk_fops) catch {
-        sk.ops.free_sk(sk);
+        sk.ops.release(sk);
         return -1;
     };
     file.ctx = sk;
     t.fs.installFd(fd, file);
     return @intCast(fd);
-
 }
 
+pub export fn sysBind(fd:u32, addr:*const SockAddr, _:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const t = task.getCurrentTask();
+    const f = t.fs.getFile(fd) orelse return -1;
+    const sk:*Sock = @alignCast(@ptrCast(f.ctx.?));
+    sk.ops.bind(sk, addr) catch return -1;
+    return 0;
+}
+
+pub export fn sysListen(fd:u32, _:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const t = task.getCurrentTask();
+    const f = t.fs.getFile(fd) orelse return -1;
+    const sk:*Sock = @alignCast(@ptrCast(f.ctx.?));
+    sk.ops.listen(sk) catch return -1;
+    return 0;
+}
+
+pub export fn sysAccept(fd:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const t = task.getCurrentTask();
+    const nfd = t.fs.getFreeFd() catch return -1;
+    const f = t.fs.getFile(fd) orelse return -1;
+    const sk:*Sock = @alignCast(@ptrCast(f.ctx.?));
+    const new = sk.ops.accept(sk) catch return -1;
+    const file = fs.File.get_new_ex(&sk_fops) catch {
+        new.ops.release(new);
+        return -1;
+    };
+    file.ctx = new;
+    t.fs.installFd(nfd, file);
+    return @intCast(nfd);
+}
+
+pub export fn sysConnect(fd:u32, addr:*const SockAddr, _:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const t = task.getCurrentTask();
+    const f = t.fs.getFile(fd) orelse return -1;
+    const sk:*Sock = @alignCast(@ptrCast(f.ctx.?));
+    sk.ops.connect(sk, addr) catch return -1;
+    return 0;
+}
+
+pub export fn sysSend(fd:u32, buf:[*]u8, len:usize, _:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const t = task.getCurrentTask();
+    const f = t.fs.getFile(fd) orelse return -1;
+    const r = write(f, buf[0..len]) catch return -1;
+    return @intCast(r);
+}
+
+pub export fn sysRecv(fd:u32, buf:[*]u8, len:usize, _:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const t = task.getCurrentTask();
+    const f = t.fs.getFile(fd) orelse return -1;
+    const r = (read(f, buf[0..len]) catch return -1).len;
+    return @intCast(r);
+}
+
+pub export fn sysSendTo(fd:u32, buf:[*]u8, len:usize, _:u32, addr:?*const SockAddr, _:u32)
+    callconv(std.builtin.CallingConvention.SysV) i64 {
+    const t = task.getCurrentTask();
+    const f = t.fs.getFile(fd) orelse return -1;
+    const sk:*Sock = @alignCast(@ptrCast(f.ctx.?));
+    const r = sk.ops.send_to(sk, buf[0..len], addr) catch return -1;
+    return @intCast(r);
+}
+
+pub export fn sysRecvFrom(fd:u32, buf:[*]u8, len:usize, _:u32, addr:?*SockAddr, _:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const t = task.getCurrentTask();
+    const f = t.fs.getFile(fd) orelse return -1;
+    const sk:*Sock = @alignCast(@ptrCast(f.ctx.?));
+    const r = (sk.ops.recv_from(sk, buf[0..len], addr) catch return -1).len;
+    return @intCast(r);
+}

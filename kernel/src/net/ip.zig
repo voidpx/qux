@@ -25,7 +25,7 @@ pub fn newPacket(payload_len:u16) !*net.Packet {
     hdr.ver_ihl = 0x45;
     hdr.ttl = 64;
     hdr.id = 0;
-    hdr.total_len = t_len;
+    hdr.setTotalLen(t_len);
     hdr.dscp_enc = 0;
     hdr.flags_frag_off = @byteSwap(@as(u16, 0b010) << 13);
     return p;

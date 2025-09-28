@@ -58,7 +58,7 @@ export fn startKernel(b: *bi.BootInfo) callconv(std.builtin.CallingConvention.Sy
     task.startSchedRoutine();
     netInit();
     //XXX: debug mem
-    kthread.createKThread("mem-watch", &printMemStat, null);
+    //kthread.createKThread("mem-watch", &printMemStat, null);
 
     //kthread.createKThread("loop", &loop, null);
 

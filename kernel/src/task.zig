@@ -79,6 +79,12 @@ pub const Mem = struct {
         return if (end - last_end >= size) last_end else 0;
     }
 
+    pub fn getPageForAddr(addr:u64) ?*mem.Page {
+        const t = getCurrentTask();
+        const pgd = t.mem.pgd;
+        return mem.getUserVmPage(pgd, addr);
+    }
+
     pub fn mmap(m: *@This(), start:u64, size:u64, flags:u64) !*VmRange {
         const l = lock.cli();
         defer lock.sti(l);
@@ -260,6 +266,11 @@ pub const TaskFs = struct {
             return error.OutOfMemory;
         };
         return f;
+    }
+
+    pub fn getFile(this:*TaskFs, fd:u32) ?*fs.File {
+        if (fd < this.open_files.items.len) return this.open_files.items[fd];
+        return null;
     }
 
     pub fn get(this:*TaskFs) ?*TaskFs {
@@ -517,13 +528,14 @@ pub export fn sysWait4(pid:i32, status:?*i32, option:i32, ru:?*anyopaque) callco
 
 pub export fn sysGetCwd(buf:[*]u8, size:usize) callconv(std.builtin.CallingConvention.SysV) i64 {
     const d = getCurrentTask().fs.cwd orelse return -1;
-    if (d.entry.name.len + 1 > size) {
-        return -1; // ERANGE
-    } else {
-        @memcpy(buf[0..d.entry.name.len], d.entry.name);
-        buf[d.entry.name.len] = 0;
-        return @intCast(d.entry.name.len);
-    }
+    return @intCast(d.getAbsPath(buf[0..size]) catch return -1);
+    //if (d.entry.name.len + 1 > size) {
+    //    return -1; // ERANGE
+    //} else {
+    //    @memcpy(buf[0..d.entry.name.len], d.entry.name);
+    //    buf[d.entry.name.len] = 0;
+    //    return @intCast(d.entry.name.len + 1);
+    //}
 }
 
 pub export fn sysGetUid() callconv(std.builtin.CallingConvention.SysV) i64 {

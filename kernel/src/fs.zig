@@ -79,6 +79,37 @@ pub const Path = struct {
         return this;
     }
 
+    pub fn getRoot(this:*const @This()) *DirEntry {
+        var t:?*DirEntry = this.entry;
+        var r = this.entry;
+        while (t) |rt| {
+            r = rt;
+            t = rt.prev;
+        }
+        return r;
+    }
+
+    fn put(dst:[]u8, src:[]const u8) ![]u8 {
+        if (dst.len >= src.len) {
+            @memcpy(dst[0..src.len], src);
+            return dst[src.len..];
+        }
+        return error.OutOfSpace; 
+    }
+
+    pub fn getAbsPath(this:*const @This(), buf:[]u8) !usize {
+        const r = this.getRoot();
+        var e:?*DirEntry = r;
+        var b = buf;
+        while (e) |d| {
+            if (d != r) b = try put(b, "/");
+            b = try put(b, d.name);
+            e = d.next;
+        }
+        b = try put(b, "\x00"); 
+        return b.ptr - buf.ptr;
+    }
+
     pub fn getParent(this:*const @This()) !Path {
         if (this.entry.prev) |_| {
             var cp = try this.copy();

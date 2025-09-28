@@ -198,6 +198,30 @@ fn handlePageFault(state: *idt.IntState) void {
     console.print("page fault handled at, 0x{x}\n", .{v.start});
 }
 
+pub fn getUserVmPage(pgd:*PageTable, addr:u64) ?*Page {
+    const pgdi = pgdIdx(addr);
+    const pudi = pudIdx(addr);
+    const pmdi = pmdIdx(addr);
+    const ptei = pteIdx(addr);
+    if (pgd.entries[pgdi] == 0) {
+        return null;
+    }
+    const pudp:*PageTable = @ptrFromInt(virtualAddr(pgd.entries[pgdi] & ~page_mask));
+    if (pudp.entries[pudi] == 0) {
+        return null;
+    }
+    const pmdp:*PageTable = @ptrFromInt(virtualAddr(pudp.entries[pudi] & ~page_mask));
+    if (pmdp.entries[pmdi] == 0) {
+        return null;
+    }
+    const ptep:*PageTable = @ptrFromInt(virtualAddr(pmdp.entries[pmdi] & ~page_mask));
+    if (ptep.entries[ptei] == 0) {
+        return null;
+    }
+    const pa = ptep.entries[ptei] & ~page_mask;
+    return pfn2Page(pa >> page_shift); 
+}
+
 pub fn mapUserVm(pgd:*PageTable, start:u64, end:u64) !void {
     const l = lock.cli();
     defer lock.sti(l);

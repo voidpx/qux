@@ -11,7 +11,7 @@ const sk_ops = net.SockOps{
     .connect = &tcpConnect,
     .recv = &read, 
     .send = &write, 
-    .free_sk = &freeTcpSk};
+    .release = &tcpReleaseSock};
 
 const isn:u32 = 0x1234abcd;
 const tcp_prot = net.ProtoFamily{.new_sock = &newTcpSock};
@@ -22,9 +22,10 @@ var listen_map:ListenSockMap = undefined;
 var conn_map:ConnSockMap = undefined;
 
 fn tcpListen(sk:*net.Sock) !void {
+    const la = sk.src_addr orelse return error.TcpSockNotBound;
     toTcpSock(sk).state = .LISTEN;
-    listen_map.put(sk.src_addr.?, toTcpSock(sk)) catch |e| {
-        toTcpSock(sk).state = .LISTEN;
+    listen_map.put(la, toTcpSock(sk)) catch |e| {
+        toTcpSock(sk).state = .CLOSED;
         return e;
     };
 }
@@ -56,14 +57,17 @@ fn tcpBind(sk:*net.Sock, addr:*const net.SockAddr) !void {
     // bind on the dummy address
     sk.src_addr = net.SockAddr{
         .family = 0,
-        .port = addr.port,
+        .port = @byteSwap(addr.port),
         .addr = @byteSwap(net.net_dev.ipv4_addr),
     };
 }
 
 fn tcpConnect(sk:*net.Sock, addr:*const net.SockAddr) !void {
     // TODO: implement connect 
-    sk.src_addr = addr.*;
+    sk.src_addr = .{
+        .addr = @byteSwap(addr.addr),
+        .port = @byteSwap(addr.port),
+    };
 }
 
 fn newTcpSock() !*net.Sock {
@@ -72,22 +76,34 @@ fn newTcpSock() !*net.Sock {
     return &sk.sk;
 }
 
-fn freeTcpSk(sk:*net.Sock) void {
+fn tcpReleaseSock(sk:*net.Sock) void {
     const tsk:*TcpSock = toTcpSock(sk);
+    if (tsk.state == .LISTEN) {
+        _ = listen_map.remove(tsk.sk.src_addr.?);
+    } else {
+        _=conn_map.remove(.{.src = tsk.sk.src_addr.?, .dst = tsk.sk.dst_addr.?});
+    }
     tsk.free();
 }
 
 const tcp_sk_ops:net.SockOps = .{
     .bind = &tcpBind,
     .listen = &tcpListen,
+    .accept = &tcpAccept,
     .connect = &tcpConnect,
     .send = &tcpSend,
+    .send_to = &tcpSendTo,
     .recv = &tcpReceive,
-    .free_sk = &freeTcpSk
+    .recv_from = &tcpReceiveFrom,
+    .release = &tcpReleaseSock
 };
 
 inline fn checkConnected(sk:*TcpSock) !void {
     if (sk.state != .ESTABLISHED) return error.TcpNotConnected;
+}
+
+fn tcpSendTo(sk:*net.Sock, buf:[]const u8, _:?*const net.SockAddr) anyerror!usize {
+    return try tcpSend(sk, buf);
 }
 
 fn tcpSend(sk:*net.Sock, buf:[]const u8) anyerror!usize {
@@ -107,13 +123,17 @@ fn tcpSend(sk:*net.Sock, buf:[]const u8) anyerror!usize {
     return buf.len;
 }
 
+fn tcpReceiveFrom(sk:*net.Sock, buf:[]u8, _:?*net.SockAddr) anyerror![]u8 {
+    return try tcpReceive(sk, buf);
+}
+
 fn tcpReceive(sk:*net.Sock, buf:[]u8) anyerror![]u8 {
     const tsk = toTcpSock(sk);
     const l = lock.cli();
     defer lock.sti(l);
     while (true) {
         try checkConnected(tsk);
-        const p = sk.rq.head orelse {
+        const p = sk.rq.peek() orelse {
             task.wait(&sk.rwq);
             continue;
         };
@@ -293,7 +313,7 @@ pub fn init() void {
     conn_map = ConnSockMap.init(alloc);
     net.registerProtoFamily(net.Proto.SOCK_STREAM, &tcp_prot) catch unreachable;
     
-    kthread.createKThread("test_tcp", &testTcp, null);
+    //kthread.createKThread("test_tcp", &testTcp, null);
 }
 
 fn testTcpEcho(a:?*anyopaque) u16 {
@@ -447,13 +467,13 @@ fn recvSYN(pkt:*net.Packet, ap:*const net.SockAddrPair) !void {
     out_th.setACK(true);
     
     ip.ipSend(out, &calcTcpSum) catch |e| {
-        new_sk.sk.ops.free_sk(&new_sk.sk);
+        new_sk.sk.ops.release(&new_sk.sk);
         return e;
     };
     new_sk.seq += 1; // SYN+ACK takes up 1 byte
     new_sk.state = .SYN_RCVD;
     conn_map.put(.{.src = ap.dst, .dst = ap.src}, new_sk) catch |e| {
-        new_sk.sk.ops.free_sk(&new_sk.sk);
+        new_sk.sk.ops.release(&new_sk.sk);
         return e;
     };
 }
@@ -505,9 +525,6 @@ fn handleRecv(ap:*const net.SockAddrPair, pkt:*net.Packet, th:*TcpHdr) !void {
                 } else {
                     console.print("SYN_RCVD state, but not an ACK: {any}, sk_seq:0x{x}, th_seq:0x{x}\n", .{th.*, ts.seq, th.getAck()});
                 }
-                //else if (th.isSYN()) {
-                //    console.print("SYN retransmit\n", .{});
-                //}
             },
             .ESTABLISHED => {
                 const tdata = pkt.getTransPacket();
