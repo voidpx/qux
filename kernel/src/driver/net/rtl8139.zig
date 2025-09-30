@@ -1,3 +1,4 @@
+const lock = @import("../../lock.zig");
 const net = @import("../../net/net.zig");
 const arp = @import("../../net/arp.zig");
 const idt = @import("../../idt.zig");
@@ -102,6 +103,8 @@ fn readRecvBuf(ptr:[*]u8, pos:u16, buf:[]u8) u16 {
 }
 
 fn read(_:*net.NetDev) !?* align(1) net.Packet {
+    const l = lock.cli();
+    defer lock.sti(l);
     var capr_r = readReg(capr, u16);
     capr_r = @addWithOverflow(capr_r, 16)[0];
     const cbr_r = readReg(cbr, u16);
@@ -119,6 +122,8 @@ fn read(_:*net.NetDev) !?* align(1) net.Packet {
 }
 
 fn _write(pkt:*net.Packet) !void {
+    const l = lock.cli();
+    defer lock.sti(l);
     const p = pkt.getRaw();
     const addr = mem.phyAddr(@intFromPtr(p.ptr));
     if (addr > 0xffffffff) {

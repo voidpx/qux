@@ -88,7 +88,7 @@ pub const BlockDevice = struct {
         try this.impl_read(this, start_sec, r_buf);
         @memcpy(r_buf[0..w_buf.len], w_buf); 
         try this.impl_write(this, start_sec, r_buf);
-        ret = w_buf.len;
+        ret += w_buf.len;
         return ret;
     }
 };

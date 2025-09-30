@@ -1,3 +1,4 @@
+const lock = @import("lock.zig");
 const syscall = @import("syscall.zig");
 const std = @import("std");
 const Count = std.atomic.Value(u64);
@@ -98,16 +99,20 @@ pub const Path = struct {
     }
 
     pub fn getAbsPath(this:*const @This(), buf:[]u8) !usize {
-        const r = this.getRoot();
+        const r = this.getRoot().next;
         var e:?*DirEntry = r;
-        var b = buf;
+        var b = try put(buf, "/");
         while (e) |d| {
-            if (d != r) b = try put(b, "/");
             b = try put(b, d.name);
+            b = try put(b, "/");
             e = d.next;
         }
-        b = try put(b, "\x00"); 
-        return b.ptr - buf.ptr;
+        var len = b.ptr - buf.ptr;
+        if (len > 1) { // not root 
+            len -= 1;
+        }
+        buf[len] = 0;
+        return len + 1;
     }
 
     pub fn getParent(this:*const @This()) !Path {
@@ -310,6 +315,8 @@ fn mkDirAt(dir:Path, name:[]const u8, mode:u16) i64 {
 const AT_FDCWD = -100;
 
 pub export fn sysNewFStatAt(dfd:i32, name: [*:0]const u8, st:*Stat, flags:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const l = lock.cli();
+    defer lock.sti(l);
     const len = std.mem.len(name);
     if (len == 0) return -1;
     if (name[0] == '/') {
@@ -342,25 +349,31 @@ pub export fn sysLStat(path: [*:0]const u8, st:*Stat) callconv(std.builtin.Calli
 }
 
 pub export fn sysFStat(fd:u32, st:*Stat) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const l = lock.cli();
+    defer lock.sti(l);
     const file = task.getCurrentTask().fs.open_files.items[fd] orelse return -1;
     return file.path.fs.ops.stat(file.path.fs, file.path, st) catch return -1;
     //return mounted_fs.ops.stat(mounted_fs, file.path, st) catch return -1;
 }
 
 pub export fn sysClose(fd:i64) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const l = lock.cli();
+    defer lock.sti(l);
     const files = &task.getCurrentTask().fs.open_files;
     if (fd < 0 or fd >= files.items.len) {
         return -1;
     }
     const f = files.items[@intCast(fd)] orelse return -1;
-    f.put();
     files.items[@intCast(fd)] = null;
+    f.put();
     return 0;
 }
 const F_DUPFD  =	0;
 const F_DUPFD_CLOEXEC = 1030;
 
 pub export fn sysDup(fd:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const l = lock.cli();
+    defer lock.sti(l);
     const cur = task.getCurrentTask();
     var f = cur.fs.open_files.items[fd] orelse return -1;
     const nfd = cur.fs.getFreeFd() catch return -1;
@@ -370,6 +383,8 @@ pub export fn sysDup(fd:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
 }
 
 pub export fn sysDup2(fd:u32, nfd:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const l = lock.cli();
+    defer lock.sti(l);
     const cur = task.getCurrentTask();
     if (nfd >= cur.fs.open_files.items.len) {
         cur.fs.ensureUnused(nfd + 1 - cur.fs.open_files.items.len) catch return -1;
@@ -387,6 +402,8 @@ const F_SETFD=2;
 const F_GETFL=3;	
 const F_SETFL=4;	
 pub export fn sysFCntl(fd:u32, cmd:u32, arg:u64) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const l = lock.cli();
+    defer lock.sti(l);
     switch (cmd) {
     F_DUPFD, F_DUPFD_CLOEXEC => {
         const cur = task.getCurrentTask();
@@ -415,6 +432,8 @@ pub export fn sysFCntl(fd:u32, cmd:u32, arg:u64) callconv(std.builtin.CallingCon
 }
 
 pub export fn sysIoCtl(fd:u32, cmd:u32, arg:u64) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const l = lock.cli();
+    defer lock.sti(l);
     const t = task.getCurrentTask();
     if (fd >= t.fs.open_files.items.len) return -1;
     const f = t.fs.open_files.items[fd] orelse return -1;
@@ -428,6 +447,8 @@ const IoVec = extern struct {
 };
 
 pub export fn sysReadV(fd:u32, vec:[*]IoVec, vlen:usize) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const l = lock.cli();
+    defer lock.sti(l);
     const f = task.getCurrentTask().fs.open_files.items[fd] orelse return -1;
     var len:i64 = -1;
     for (0..vlen) |v| {
@@ -471,6 +492,8 @@ pub export fn sysChDir(path: [*:0]const u8) callconv(std.builtin.CallingConventi
 }
 
 pub export fn sysOpenAt(dfd:i32, path: [*:0]const u8, flags:u32, mode:u16) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const l = lock.cli();
+    defer lock.sti(l);
     const t = task.getCurrentTask();
     const fd = t.fs.getFreeFd() catch return -1;
     const len = std.mem.len(path);
@@ -493,6 +516,8 @@ pub export fn sysAccess(path: [*:0]const u8, mode:u16) callconv(std.builtin.Call
 
 pub export fn sysOpen(path: [*:0]const u8, flags:u32, mode:u16) callconv(std.builtin.CallingConvention.SysV) i64 {
     _=&mode;
+    const l = lock.cli();
+    defer lock.sti(l);
     const t = task.getCurrentTask();
     const fd = t.fs.getFreeFd() catch return -1;
     // TODO: for testing fb, refactor this
@@ -508,6 +533,8 @@ pub export fn sysOpen(path: [*:0]const u8, flags:u32, mode:u16) callconv(std.bui
 }
 
 pub fn openAt(dfd:i32, path: [*:0]const u8, flags:u32) !*File {
+    const l = lock.cli();
+    defer lock.sti(l);
     const len = std.mem.len(path);
     if (len == 0) return error.InvalidPath;
     var dir:Path = undefined;
@@ -550,6 +577,8 @@ pub const SeekWhence = enum(u32) {
 };
 
 pub export fn sysLSeek(fd: u32, off:i64, whence:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const l = lock.cli();
+    defer lock.sti(l);
     const f = task.getCurrentTask().fs.open_files.items[fd] orelse return -1;
     const s:SeekWhence = @enumFromInt(whence);
     switch (s) {
@@ -569,6 +598,8 @@ pub export fn sysLSeek(fd: u32, off:i64, whence:u32) callconv(std.builtin.Callin
 }
 
 pub export fn sysGetDents64(fd: u32, buf: *DEntry, len:u64) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const l = lock.cli();
+    defer lock.sti(l);
     const f = task.getCurrentTask().fs.open_files.items[fd] orelse return -1;
     const sz = (f.ops.readdir orelse return -1)(f, buf, len) catch return -1;
     //f.pos += @intCast(sz);
@@ -590,6 +621,8 @@ pub export fn sysSendFile(out_fd: u32, in_fd: u32, offset:*u64, count:u64) callc
 }
 
 pub export fn sysRead(fd: u32, buf: [*]u8, len:u64) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const l = lock.cli();
+    defer lock.sti(l);
     const f = task.getCurrentTask().fs.open_files.items[fd] orelse return -1;
     const r = read(f, buf[0..len]) catch {
         return -1;
@@ -606,6 +639,8 @@ pub fn read(f:*File, buf:[]u8) !u64 {
 }
 
 pub export fn sysWrite(fd: u32, buf: [*]u8, len:u64) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const l = lock.cli();
+    defer lock.sti(l);
     const f = task.getCurrentTask().fs.open_files.items[fd] orelse return -1;
         //TODO: fix this
     const r = (f.ops.write(f, buf[0..len])) catch return -1;

@@ -726,7 +726,8 @@ fn readSuperBlock(sbp:*SuperBlock) !void {
 fn readGroupDescriptor(gi:u32) !BlockGroupDescriptor {
     const descriptor_offset = if (block_size == 1024) 1024 else 4096 + gi * @sizeOf(BlockGroupDescriptor); 
     var bgd: BlockGroupDescriptor = undefined;
-    _ = try bdev.read(descriptor_offset, std.mem.asBytes(&bgd));
+    const r = try bdev.read(descriptor_offset, std.mem.asBytes(&bgd));
+    std.debug.assert(r == @sizeOf(BlockGroupDescriptor));
     return bgd;
 }
 

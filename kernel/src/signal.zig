@@ -161,7 +161,7 @@ fn handleSignal(s:i32) void {
         _=task.getCurrentTask().signal.in_signal.cmpxchgWeak(true, false, .acquire, .monotonic);
         return;
     };
-    //console.print("handling signal {}, task:0x{x}\n", .{s, @as(u64, @intFromPtr(t))});
+    console.print("handling signal {}, task:{}\n", .{s, t.id});
     const regs = task.getCurrentState();
     const fsp = std.mem.alignBackward(u64, regs.rsp - 128 - @sizeOf(SigFrame), 16);
     const sigframe:*SigFrame = @ptrFromInt(fsp);

@@ -25,6 +25,7 @@ var disk_capacity:u64 = 0;
 
 const io = @import("../io.zig");
 const std = @import("std");
+const lock = @import("../lock.zig");
 
 const blk = @import("block.zig");
 fn ata_wait_busy() void {
@@ -195,6 +196,8 @@ pub fn init() void {
 var parts:[4]blk.BlockDevice = undefined;
 
 fn readBlks(bdev:*blk.BlockDevice, start:usize, buf:[]u8) io.IOError!void {
+    const l = lock.cli();
+    defer lock.sti(l);
     var off:usize = 0;
     if (bdev.ctx) |c| {
         off = @intFromPtr(c); // partition start
@@ -210,6 +213,8 @@ fn readBlks(bdev:*blk.BlockDevice, start:usize, buf:[]u8) io.IOError!void {
 }
 
 fn writeBlks(bdev:*blk.BlockDevice, start:usize, buf:[]const u8) io.IOError!void {
+    const l = lock.cli();
+    defer lock.sti(l);
     var off:usize = 0;
     if (bdev.ctx) |c| {
         off = @intFromPtr(c); // partition start

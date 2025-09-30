@@ -79,9 +79,8 @@ pub const Mem = struct {
         return if (end - last_end >= size) last_end else 0;
     }
 
-    pub fn getPageForAddr(addr:u64) ?*mem.Page {
-        const t = getCurrentTask();
-        const pgd = t.mem.pgd;
+    pub fn getPageForAddr(m:*@This(), addr:u64) ?*mem.Page {
+        const pgd = m.pgd;
         return mem.getUserVmPage(pgd, addr);
     }
 
@@ -340,8 +339,8 @@ pub const TaskListener = struct {
 const TaskListenerList = std.DoublyLinkedList(*TaskListener);
 
 pub const Task = struct {
-    list:TaskList.Node = undefined, 
-    child_link:TaskList.Node = undefined,
+    list:TaskList.Node = .{.data = undefined}, 
+    child_link:TaskList.Node = .{.data = undefined},
     stack:u64 = 0,
     state:TaskState = .new,
     flags:u8 = 0,
@@ -360,7 +359,7 @@ pub const Task = struct {
     user:User = .{},
     exit_wq:WaitQueue = .{},
     threads:TaskList = .{},
-    thread_link:TaskList.Node = undefined,
+    thread_link:TaskList.Node = .{.data = undefined},
     exit_listeners: TaskListenerList = .{},
     on_wq:?struct {q:*WaitQueue, n:*WaitQueue.Node} = null,
 
@@ -439,6 +438,7 @@ pub const Task = struct {
         }
         const exit_code = this.exit_code;
         // let the waiter handle the chld signal even the waitee is dead
+        task_list.remove(&this.list);
         this.die();
         return exit_code;
     }
@@ -484,6 +484,7 @@ pub fn init() void {
     syscall.registerSysCall(syscall.SysCallNo.sys_set_tid_address, &sysSetTidAddr);
     syscall.registerSysCall(syscall.SysCallNo.sys_set_robust_list, &sysSetRobustList);
     syscall.registerSysCall(syscall.SysCallNo.sys_prlimit64, &sysPrLimit64);
+    syscall.registerSysCall(syscall.SysCallNo.sys_prctl, &sysPrCtl);
     syscall.registerSysCall(syscall.SysCallNo.sys_mprotect, &sysMProtect);
     syscall.registerSysCall(syscall.SysCallNo.sys_gettid, &sysGetTid);
     syscall.registerSysCall(syscall.SysCallNo.sys_getpid, &sysGetPid);
@@ -500,7 +501,6 @@ pub fn init() void {
     syscall.registerSysCall(syscall.SysCallNo.sys_wait4, &sysWait4);
 
     sig.init();
-    //XXX: special handling for std in/out/err
 }
 
 pub export fn sysWait4(pid:i32, status:?*i32, option:i32, ru:?*anyopaque) callconv(std.builtin.CallingConvention.SysV) i64 {
@@ -624,6 +624,34 @@ pub const ResLimit = extern struct {
     max:u64 = std.math.maxInt(u64),
 };
 
+const PrCtrCmd = enum(u32) {
+    PR_SET_NAME = 15,
+    PR_GET_NAME = 16,
+    _
+};
+
+pub export fn sysPrCtl(op:u32, a1:u64, a2:u64, a3:u64, a4:u64) callconv(std.builtin.CallingConvention.SysV) i64 {
+    _=&a2;
+    _=&a3;
+    _=&a4;
+    const t = getCurrentTask();
+    const cmd:PrCtrCmd = @enumFromInt(op);
+    switch (cmd) {
+        .PR_SET_NAME => {
+            const p:[*]const u8 = @ptrFromInt(a1);
+            @memcpy(&t.name, p);
+        },
+        .PR_GET_NAME => {
+            const p:[*]u8 = @ptrFromInt(a1);
+            @memcpy(p, &t.name);
+        },
+        else => {
+
+        }
+    }
+    return 0;
+}
+
 pub export fn sysPrLimit64(pid:u32, res:u32, new:?*ResLimit, old:?*ResLimit) callconv(std.builtin.CallingConvention.SysV) i64 {
    if (old) |o| {
         o.* = ResLimit{};
@@ -726,25 +754,25 @@ pub fn getTotalTasks() usize {
 
 // DEBUG
 const runq_min_cap:u32 = 8;
-pub fn reapTasks() void {
-    const v = lock.cli();
-    defer lock.sti(v);
-    var n = task_list.first;
-    while (n) |t| {
-        const next = t.next;
-        const proc = t.data;
-        if (proc.state == .dead) {
-            console.print("reaping dead task {s}\n", .{proc.getName()});
-            task_list.remove(t);
-            // TODO: re-parent children
-            proc.die();
-        }
-        n = next;
-    }
-    if (runq.len < runq.capacity() / 2) {
-        runq.shrinkAndFree(@min(@max(runq.len, runq_min_cap), runq.capacity()));
-    }
-}
+//pub fn reapTasks() void {
+//    const v = lock.cli();
+//    defer lock.sti(v);
+//    var n = task_list.first;
+//    while (n) |t| {
+//        const next = t.next;
+//        const proc = t.data;
+//        if (proc.state == .dead) {
+//            console.print("reaping dead task {s}\n", .{proc.getName()});
+//            task_list.remove(t);
+//            // TODO: re-parent children
+//            proc.die();
+//        }
+//        n = next;
+//    }
+//    if (runq.len < runq.capacity() / 2) {
+//        runq.shrinkAndFree(@min(@max(runq.len, runq_min_cap), runq.capacity()));
+//    }
+//}
 
 pub const TaskStack = [task_stack_size]u8; 
 inline fn dupTask(cur:*Task) !*Task {
@@ -914,7 +942,7 @@ fn exitTask(t:*Task, code:u16) void {
            exitTask(n.data, code); 
         }
     } else {
-        //console.print("thread exit: {}\n", .{t.id});
+        console.print("thread exit: {}\n", .{t.id});
     }
     t.exit_code = code;
     t.state = .dead;
@@ -924,9 +952,10 @@ fn exitTask(t:*Task, code:u16) void {
     }
     if (t.parent) |p| {
         p.children.remove(&t.child_link);
-        p.sendSignal(.chld); //TODO: handle this
+        if (t.id == t.pid) { // not a thread
+            p.sendSignal(.chld); //TODO: handle this
+        }
     }
-    task_list.remove(&t.list);
     wakeup(&t.exit_wq);
 }
 
@@ -973,6 +1002,10 @@ pub fn wait(wq: *WaitQueue) void {
     const l = lock.cli();
     defer lock.sti(l);
     const t = getCurrentTask();
+    //if (t.id > 4) {
+    //    console.log("enter wait: {}, {s}\n", .{t.id, &t.name});
+
+    //}
     t.state = .blocked;
     var node = WaitQueue.Node{.data = t};
     t.on_wq = .{.q = wq, .n = &node};
@@ -1031,10 +1064,19 @@ fn taskRegs(t:*Task) *idt.IntState {
 fn setupTask(a:*const CloneArgs, task:*Task, cur:*Task) !void {
     task.id = task_id;
     task_id += 1;
+    task.child_link = .{.data = task};
+    task.children = .{};
+    task.exit_wq = .{};
+    task.exit_listeners = .{};
+    task.on_wq = null;
+    task.threads = .{};
+    task.thread_link = .{.data = task};
+    task.parent = cur;
+    task.signal = .{};
+    task.signal.sig_actions = .{sig.SigAction{}}**64;
+    task.sched = .{};
     const stack = try mem.allocator.create(TaskStack);
     task.stack = @intFromPtr(stack);
-    task.list = .{.prev = null, .next = null, .data = task};
-    task.children = .{};
     const len = @min(task.name.len, a.name.len);
     @memcpy(@as([*]u8, &task.name), a.name[0..len]);
     const last = if (len<task.name.len) len else task.name.len - 1;
@@ -1076,7 +1118,7 @@ fn setupTask(a:*const CloneArgs, task:*Task, cur:*Task) !void {
             try task.mem.get();
             task.fs = cur.fs.get().?;
             const proc = getTask(cur.pid) orelse unreachable;
-            task.thread_link = .{.data = task};
+            //task.thread_link = .{.data = task};
             proc.threads.append(&task.thread_link);
         }
         if (a.tls != 0) {
@@ -1086,12 +1128,8 @@ fn setupTask(a:*const CloneArgs, task:*Task, cur:*Task) !void {
     task.list = .{.prev = null, .next = null, .data = task};
     task_list.append(&task.list);
     task.sp = fp;
-    task.parent = cur;
-    task.signal = .{};
-    task.signal.sig_actions = .{sig.SigAction{}}**64;
-    task.child_link.data = task;
+    //task.child_link.data = task;
     cur.children.append(&task.child_link);
-    task.sched = .{};
     task.sched.share = if (runq.peek()) |t| t.sched.share else 0; 
 }
 

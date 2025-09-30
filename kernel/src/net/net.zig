@@ -16,13 +16,12 @@ pub const Sock = struct {
     src_addr:?SockAddr = null,
     dst_addr:?SockAddr = null,
     ops:*const SockOps = undefined,
-
-    
 };
 
 pub const Proto = enum (u8) {
     SOCK_STREAM = 1,
     SOCK_DGRAM = 2,
+    SOCK_RAW = 3,
 };
 
 pub const SockAddr = extern struct {
@@ -390,6 +389,8 @@ fn finalize(file:*fs.File) anyerror!void {
 pub export fn sysSocket(family:u32, ptype:u32, proto:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
     _=&family;
     _=&proto;
+    const l = lock.cli();
+    defer lock.sti(l);
     const t = task.getCurrentTask();
     const fd = t.fs.getFreeFd() catch return -1;
     const nf = sock_map.get(@enumFromInt(ptype)) orelse return -1;
@@ -419,19 +420,24 @@ pub export fn sysListen(fd:u32, _:u32) callconv(std.builtin.CallingConvention.Sy
     return 0;
 }
 
-pub export fn sysAccept(fd:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+fn doAccept(fd:u32) !i64 {
     const t = task.getCurrentTask();
-    const nfd = t.fs.getFreeFd() catch return -1;
     const f = t.fs.getFile(fd) orelse return -1;
     const sk:*Sock = @alignCast(@ptrCast(f.ctx.?));
-    const new = sk.ops.accept(sk) catch return -1;
-    const file = fs.File.get_new_ex(&sk_fops) catch {
-        new.ops.release(new);
-        return -1;
-    };
+    const new = try sk.ops.accept(sk);
+    errdefer new.ops.release(new);
+    const l = lock.cli();
+    defer lock.sti(l);
+    const nfd = try t.fs.getFreeFd();
+    const file = try fs.File.get_new_ex(&sk_fops);
     file.ctx = new;
     t.fs.installFd(nfd, file);
     return @intCast(nfd);
+
+}
+
+pub export fn sysAccept(fd:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    return doAccept(fd) catch return -1;
 }
 
 pub export fn sysConnect(fd:u32, addr:*const SockAddr, _:u32) callconv(std.builtin.CallingConvention.SysV) i64 {

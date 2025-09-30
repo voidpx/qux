@@ -46,22 +46,25 @@ pub inline fn sti(v:bool) void {
         asm volatile("sti");
     }
 }
-const FUTEX_WAIT		= 0   ;
-const FUTEX_WAKE		= 1   ;
-const FUTEX_FD		= 2   ;
-const FUTEX_REQUEUE		= 3   ;
-const FUTEX_CMP_REQUEUE	= 4   ;
-const FUTEX_WAKE_OP		= 5   ;
-const FUTEX_LOCK_PI		= 6   ;
-const FUTEX_UNLOCK_PI		= 7   ;
-const FUTEX_TRYLOCK_PI	= 8   ;
-const FUTEX_WAIT_BITSET	= 9   ;
-const FUTEX_WAKE_BITSET	= 10  ;
-const FUTEX_WAIT_REQUEUE_PI	= 11  ;
-const FUTEX_CMP_REQUEUE_PI	= 12  ;
-const FUTEX_LOCK_PI2		= 13  ;
-const FUTEX_PRIVATE_FLAG	= 128 ;
-const FUTEX_CLOCK_REALTIME	= 256 ;
+const FUTEX_WAIT		:i32 = 0   ;
+const FUTEX_WAKE		:i32 = 1   ;
+const FUTEX_FD		        :i32 = 2   ;
+const FUTEX_REQUEUE		:i32 = 3   ;
+const FUTEX_CMP_REQUEUE	        :i32 = 4   ;
+const FUTEX_WAKE_OP		:i32 = 5   ;
+const FUTEX_LOCK_PI		:i32 = 6   ;
+const FUTEX_UNLOCK_PI		:i32 = 7   ;
+const FUTEX_TRYLOCK_PI	        :i32 = 8   ;
+const FUTEX_WAIT_BITSET	        :i32 = 9   ;
+const FUTEX_WAKE_BITSET	        :i32 = 10  ;
+const FUTEX_WAIT_REQUEUE_PI	:i32 = 11  ;
+const FUTEX_CMP_REQUEUE_PI	:i32 = 12  ;
+const FUTEX_LOCK_PI2		:i32 = 13  ;
+const FUTEX_PRIVATE_FLAG	:i32 = 128 ;
+const FUTEX_CLOCK_REALTIME	:i32 = 256 ;
+const FUTEX_WAIT_PRIVATE	:i32 = (FUTEX_WAIT | FUTEX_PRIVATE_FLAG);
+const FUTEX_WAKE_PRIVATE	:i32 = (FUTEX_WAKE | FUTEX_PRIVATE_FLAG);
+const console = @import("console.zig");
 const time = @import("time.zig");
 const mem = @import("mem.zig");
 const syscall = @import("syscall.zig");
@@ -69,18 +72,51 @@ const FutexMap = std.AutoHashMap(u64, task.WaitQueue);
 var futex_map:FutexMap = undefined;
 pub export fn sysFutex(uaddr:*u32, op:i32, val:u32, utime:?*time.Time, uadd2:?*u32, val3:u32)
     callconv(std.builtin.CallingConvention.SysV) i64 {
-    if (uaddr.* != val) return syscall.EAGAIN; 
     const l = cli();
     defer sti(l);
     const t = task.getCurrentTask();
-    const p = t.mem.getPageForAddr(uaddr) orelse return -1;
     const addr:u64 = @intFromPtr(uaddr);
-    const pa = p.getPhyAddr() + (addr & mem.page_shift);
-    
+    const p = t.mem.getPageForAddr(addr) orelse return -1;
+    const pa = p.getPhyAddr() + (addr & mem.page_mask);
+    switch (op) {
+        FUTEX_WAIT, FUTEX_WAIT_PRIVATE => {
+            return futexWait(uaddr, val, pa);
+        },
+        FUTEX_WAKE, FUTEX_WAKE_PRIVATE => {
+            return futexWake(pa);
+        },
+        else => {
+            console.print("unsupported futex op: {}\n", .{op});
+        },
+
+    }
+    _=&utime;
+    _=&uadd2;
+    _=&val3;
+    return 0;
 
 }
+
+fn futexWake(pa:u64) i64 {
+    const wq = futex_map.getPtr(pa) orelse return 0;
+    const c = wq.len;
+    task.wakeup(wq);
+    return @intCast(c);
+}
+
+fn futexWait(uaddr:*u32, val:u32, pa:u64) i64 {
+    if (uaddr.* != val) return -syscall.EAGAIN; 
+    const wq = futex_map.getPtr(pa) orelse blk:{
+        futex_map.put(pa, .{}) catch return -1;
+        break :blk futex_map.getPtr(pa).?;
+    };
+    task.wait(wq);
+    return 0;
+}
+
 pub fn init() void {
     futex_map = FutexMap.init(mem.allocator);
+    syscall.registerSysCall(syscall.SysCallNo.sys_futex, &sysFutex);
 }
 
 

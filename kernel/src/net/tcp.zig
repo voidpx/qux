@@ -5,15 +5,8 @@ const ip = @import("ip.zig");
 const net = @import("net.zig");
 const console = @import("../console.zig");
 const alloc = @import("../mem.zig").allocator;
-const sk_ops = net.SockOps{
-    .listen = &tcpListen,
-    .bind = &tcpBind,
-    .connect = &tcpConnect,
-    .recv = &read, 
-    .send = &write, 
-    .release = &tcpReleaseSock};
 
-const isn:u32 = 0x1234abcd;
+const isn:u32 = 0;
 const tcp_prot = net.ProtoFamily{.new_sock = &newTcpSock};
 
 const ListenSockMap = std.AutoHashMap(net.SockAddr, *TcpSock);
@@ -106,12 +99,10 @@ fn tcpSendTo(sk:*net.Sock, buf:[]const u8, _:?*const net.SockAddr) anyerror!usiz
     return try tcpSend(sk, buf);
 }
 
-fn tcpSend(sk:*net.Sock, buf:[]const u8) anyerror!usize {
-    const tsk = toTcpSock(sk);
-    try checkConnected(tsk);
+fn sendOne(tsk:*TcpSock, buf:[]const u8) !usize {
     const out = try ip.newPacket(@intCast(@sizeOf(TcpHdr) + buf.len)); 
     defer out.free();
-    sendPrepare(tsk, &sk.dst_addr.?, out);
+    sendPrepare(tsk, &tsk.sk.dst_addr.?, out);
     const tdata = out.getTransPacket();
     const th:*TcpHdr = @ptrCast(tdata.ptr);
     th.setACK(true);
@@ -121,6 +112,20 @@ fn tcpSend(sk:*net.Sock, buf:[]const u8) anyerror!usize {
     try ip.ipSend(out, &calcTcpSum);
     tsk.seq = @addWithOverflow(tsk.seq, @as(u32, @truncate(buf.len)))[0];
     return buf.len;
+}
+
+fn tcpSend(sk:*net.Sock, buf:[]const u8) anyerror!usize {
+    const tsk = toTcpSock(sk);
+    try checkConnected(tsk);
+    var tbuf = buf;
+    var ret:usize = 0;
+    while (tbuf.len > 0) {
+        const len = @min(tbuf.len, MSS);
+        const buf2 = tbuf[0..len];
+        ret += try sendOne(tsk, buf2);
+        tbuf = tbuf[len..];
+    }
+    return ret;
 }
 
 fn tcpReceiveFrom(sk:*net.Sock, buf:[]u8, _:?*net.SockAddr) anyerror![]u8 {
@@ -322,12 +327,12 @@ fn testTcpEcho(a:?*anyopaque) u16 {
     defer alloc.free(buf);
     while (true) {
         const d = sk.sk.ops.recv(&sk.sk, buf) catch |e| {
-            console.print("error recv tcp packet: {}\n", .{e}); 
+            console.log("error recv tcp packet: {}\n", .{e}); 
             break;
         };
-        //console.print("received tcp pkt:{s}\n", .{d});
+        //console.log("received tcp pkt:{s}\n", .{d});
         _=sk.sk.ops.send(&sk.sk, d) catch |e| {
-            console.print("error sending tcp packet: {}\n", .{e}); 
+            console.log("error sending tcp packet: {}\n", .{e}); 
             break;
         };
     }
@@ -351,17 +356,6 @@ fn testTcp(_:?*anyopaque) u16 {
 }
 
 const MSS:u16 = 1460;
-
-fn write(sk:*net.Sock, buf:[]const u8) !usize {
-    
-    _=&sk;
-    _=&buf;
-}
-
-fn read(sk:*net.Sock, buf:[]u8) ![]u8 {
-    _=&sk;
-    _=&buf;
-}
 
 fn calcTcpSum(p_sum:u16, pkt:*net.Packet) void {
     const data:[]u8 = pkt.getTransPacket();
@@ -407,9 +401,9 @@ fn sendRST(laddr:*const net.SockAddr, raddr:*const net.SockAddr, th:*TcpHdr) !vo
     defer out.free();
     const out_th:*TcpHdr = @ptrCast(out.getTransPacket().ptr);
     sendPrepare0(laddr, raddr, out);
-    out_th.setSeq(0x1234abcd);
+    out_th.setSeq(if (th.isACK()) th.getAck() else isn);
     out_th.setAck(th.getSeq() + 1);
-    out_th.setACK(true);
+    //out_th.setACK(true);
     out_th.setRST(true);
     out_th.setHdrLen(@sizeOf(TcpHdr));
     try ip.ipSend(out, &calcTcpSum);
@@ -478,28 +472,31 @@ fn recvSYN(pkt:*net.Packet, ap:*const net.SockAddrPair) !void {
     };
 }
 
-fn sendACK(sk:*TcpSock, pkt:*net.Packet, fin:bool) !void {
+fn sendACK(sk:?*TcpSock, pkt:*net.Packet, fin:bool) !void {
     const out = try ip.newPacket(@sizeOf(TcpHdr));
     defer out.free();
     const ap = getAddrPair(pkt);
-    sendPrepare(sk, &ap.src, out);
+    sendPrepare0(&ap.dst, &ap.src, out);
     const th:*TcpHdr = @ptrCast(out.getTransPacket().ptr);
     th.setHdrLen(@sizeOf(TcpHdr));
     th.setACK(true);
     if (fin) th.setFIN(true);
     try ip.ipSend(out, &calcTcpSum);
-    if (fin) sk.seq = @addWithOverflow(sk.seq, 1)[0];
+    if (fin and sk != null) sk.?.seq = @addWithOverflow(sk.?.seq, 1)[0];
 }
 
-fn recvFIN(sk:*TcpSock, pkt:*net.Packet) !void {
-    defer pkt.free();
+fn recvFIN(tsk:?*TcpSock, pkt:*net.Packet) !void {
+    const sk = tsk orelse {
+        try sendACK(null, pkt, false);
+        return;
+    };
     if (sk.state != .CLOSED) {
         sk.ack = @addWithOverflow(sk.ack, 1)[0];
         try sendACK(sk, pkt, false);
         try sendACK(sk, pkt, true);
         sk.state = .LAST_ACK;
     } else {
-        console.print("FIN received in wrong state: {}\n", .{sk.state});
+        console.log("FIN received in wrong state: {}\n", .{sk.state});
     }
     
 }
@@ -507,63 +504,70 @@ fn recvFIN(sk:*TcpSock, pkt:*net.Packet) !void {
 fn handleRecv(ap:*const net.SockAddrPair, pkt:*net.Packet, th:*TcpHdr) !void {
     const l = lock.cli();
     defer lock.sti(l);
+    errdefer pkt.free();
     const sk = conn_map.get(.{.src = ap.dst, .dst = ap.src});
     if (sk) |ts| {
         if (th.isFIN()) {
             try recvFIN(ts, pkt);
-            return;
-        }
-        // connected or half open
-        blk: switch (ts.state) {
-            .SYN_RCVD => {
-                if (th.isACK() and ts.seq == th.getAck()) {
-                    // finished 3-way handshake
-                    ts.state = .ESTABLISHED;
-                    const lsk = listen_map.get(ts.sk.src_addr.?).?;
-                    try lsk.conns.append(ts);
-                    task.wakeup(&lsk.sk.rwq);
-                } else {
-                    console.print("SYN_RCVD state, but not an ACK: {any}, sk_seq:0x{x}, th_seq:0x{x}\n", .{th.*, ts.seq, th.getAck()});
-                }
-            },
-            .ESTABLISHED => {
-                const tdata = pkt.getTransPacket();
-                const thlen = th.getHdrLen();
-                const len = tdata.len - thlen;
-                if (len == 0) {
-                    if (th.isACK()) { // pure ack
-                        // TODO: remove the packet waiting in the retransmission queue
+        } else if (th.isRST()) {
+            console.log("RST received from peer\n", .{});
+            _=conn_map.remove(.{.src = ap.dst, .dst = ap.src});
+            task.wakeup(&ts.sk.rwq);
+            task.wakeup(&ts.sk.wwq);
+        } else {
+            // connected or half open
+            blk: switch (ts.state) {
+                .SYN_RCVD => {
+                    if (th.isACK() and ts.seq == th.getAck()) {
+                        // finished 3-way handshake
+                        ts.state = .ESTABLISHED;
+                        const lsk = listen_map.get(ts.sk.src_addr.?).?;
+                        try lsk.conns.append(ts);
+                        task.wakeup(&lsk.sk.rwq);
+                    } else {
+                        console.log("SYN_RCVD state, but not an ACK: {any}, sk_seq:0x{x}, th_seq:0x{x}\n", .{th.*, ts.seq, th.getAck()});
                     }
-                    break :blk;
+                },
+                .ESTABLISHED => {
+                    const tdata = pkt.getTransPacket();
+                    const thlen = th.getHdrLen();
+                    const len = tdata.len - thlen;
+                    if (len == 0) {
+                        if (th.isACK()) { // pure ack
+                            // TODO: remove the packet waiting in the retransmission queue
+                        }
+                        break :blk;
+                    }
+                    const ack:u32 = @addWithOverflow(ts.ack, @as(u32, @truncate(len)))[0];
+                    if (ack != th.getSeq() + len) {
+                        //console.log("packet arrived out of order\n", .{});
+                        break :blk;
+                    }
+                    ts.ack = ack;
+                    try sendACK(ts, pkt, false); 
+                    ts.sk.rq.enqueue(pkt);
+                    task.wakeup(&ts.sk.rwq);
+                    return; // return here so packet is not freed as it's pushed to upper layer
+                },
+                .LAST_ACK => {
+                    if (th.getAck() == ts.seq) {
+                        ts.state = .CLOSED;
+                        console.log("FIN ACKED\n", .{});
+                    }
+                    _=conn_map.remove(.{.src = ap.dst, .dst = ap.src});
+                    task.wakeup(&ts.sk.rwq);
+                    task.wakeup(&ts.sk.wwq);
+                },
+                else => {
+                    console.log("tcp packet not handled\n", .{});
                 }
-                const ack:u32 = @addWithOverflow(ts.ack, @as(u32, @truncate(len)))[0];
-                if (ack != th.getSeq() + len) {
-                    console.print("packet arrived out of order\n", .{});
-                    break :blk;
-                }
-                ts.ack = ack;
-                try sendACK(ts, pkt, false); 
-                ts.sk.rq.enqueue(pkt);
-                task.wakeup(&ts.sk.rwq);
-                return;
-            },
-            .LAST_ACK => {
-                if (th.getAck() == ts.seq) {
-                    ts.state = .CLOSED;
-                    console.print("FIN ACKED\n", .{});
-                }
-                _=conn_map.remove(.{.src = ap.dst, .dst = ap.src});
-                task.wakeup(&ts.sk.rwq);
-                task.wakeup(&ts.sk.wwq);
-            },
-            else => {
-                console.print("tcp packet not handled\n", .{});
             }
         }
     } else {
         if (th.isSYN() and !th.isACK()) {
             try recvSYN(pkt, ap);
         } else {
+            sendRST(&ap.dst, &ap.src, th) catch {};
         }
     }
     pkt.free();
@@ -571,6 +575,7 @@ fn handleRecv(ap:*const net.SockAddrPair, pkt:*net.Packet, th:*TcpHdr) !void {
 
 fn handleTcpRecv(_:*net.NetReceiver, pkt:*net.Packet) !void {
     const th:*TcpHdr = @ptrCast(pkt.getTransPacket().ptr);
+    //console.log("recv: {any}\n", .{th});
     const ap = getAddrPair(pkt);
     try handleRecv(&ap, pkt, th);
 }

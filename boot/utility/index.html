@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simple HTML with JavaScript</title>
+    <script src="index.js" defer></script>
+    
+    <script src="vue.global.js"></script>
+    
+</head>
+<body>
+
+<div id="app">{{ message }}</div>
+
+<div id="test">{{test}}</div>
+
+<script>
+
+// Create a class for the element
+class MyCustomElement extends HTMLElement {
+  static observedAttributes = ["color", "size"];
+
+  constructor() {
+    // Always call super first in constructor
+    super();
+  }
+
+  connectedCallback() {
+    console.log("Custom element added to page.");
+  }
+
+  disconnectedCallback() {
+    console.log("Custom element removed from page.");
+  }
+
+  adoptedCallback() {
+    console.log("Custom element moved to new page.");
+  }
+
+  attributeChangedCallback(name, oldValue, newValue) {
+    console.log(`Attribute ${name} has changed.`);
+  }
+}
+
+customElements.get('my-test') || customElements.define("my-test", MyCustomElement);
+
+  const { createApp, ref } = Vue
+
+	let a = {Vue};
+
+  createApp({
+    setup() {
+      const message = ref('Hello!')
+      return {
+        message,
+        
+      }
+    }
+  }).mount('#app')
+  
+  createApp({
+  	setup() {
+  		return  { test: "Greetings from Qux!"}
+  	}
+  	}).mount('#test');
+  
+</script>
+  <my-test>This is a page served from Qux</my-test>
+    <h1>Welcome to My Simple Page</h1>
+    <p>This is a paragraph of text on my simple page.</p>
+    <p>here is a cute puppy</p>
+    <img src="puppy.webp" width="400" height="600"/>
+    <button onclick="showMessage()">Click Me!</button>
+</body>
+</html>
