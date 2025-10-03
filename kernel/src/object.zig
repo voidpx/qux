@@ -24,6 +24,7 @@ const Object = struct {
 pub fn new(comptime T:type, ctor:?*const fn(*T) anyerror!void, dtor:?*const fn(*T) void) !*T {
     const t = getObjType(T);
     const o = try alloc.create(t);
+    @memset(@as([*]u8, @ptrCast(o))[0..@sizeOf(t)], 0);
     o.__obj_base = .{.ref_count = Count.init(1), .dtor = @ptrCast(dtor)};
     if (ctor) |c| {
         c(&o.object) catch |err| {

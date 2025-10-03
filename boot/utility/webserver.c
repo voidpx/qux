@@ -257,20 +257,20 @@ static void return_file(char *file, size_t size, int fd) {
 
 	prctl(PR_SET_NAME, file);
 #ifdef DEBUG
-	printf("start reading file %s\n", file);
+	printf("tid: %d, rfd: %d, wfd: %d, start reading file %s\n", tid, fileno(f), fd, file);
 #endif
 	while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
 #ifdef DEBUG
-		printf("tid: %d, %s: bytes read %d\n", tid, file, n);
+		//printf("tid: %d, %s: bytes read %d\n", tid, file, n);
 #endif
 		write(fd, buf, n);
 #ifdef DEBUG
-		printf("tid: %d, %s: bytes written %d\n", tid, file, n);
+		//printf("tid: %d, %s: bytes written %d\n", tid, file, n);
 #endif
 		count+= n;
 	}
 #ifdef DEBUG
-	printf("tid: %d, %s: size: %d, written: %d, n: %d\n", tid, file, size, count, n);
+	printf("tid: %d, rfd: %d, wfd: %d, %s: size: %d, written: %d, n: %d\n", tid, fileno(f), fd, file, size, count, n);
 #endif
 	fclose(f);
 }

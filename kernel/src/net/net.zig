@@ -364,8 +364,7 @@ pub fn init() void {
     syscall.registerSysCall(syscall.SysCallNo.sys_connect, &sysConnect);
     syscall.registerSysCall(syscall.SysCallNo.sys_recvfrom, &sysRecvFrom);
     syscall.registerSysCall(syscall.SysCallNo.sys_sendto, &sysSendTo);
-    //syscall.registerSysCall(syscall.SysCallNo.sys_socket, &sysSocket);
-    //syscall.registerSysCall(syscall.SysCallNo.sys_socket, &sysSocket);
+    syscall.registerSysCall(syscall.SysCallNo.sys_setsockopt, &sysSetSockOpt);
 
 }
 
@@ -385,6 +384,14 @@ fn finalize(file:*fs.File) anyerror!void {
     sk.ops.release(sk);
 }
 
+pub export fn sysSetSockOpt(fd:u32, level:u32, name:u32, val:?[*]u8, len:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    _=&fd;
+    _=&level;
+    _=&name;
+    _=&val;
+    _=&len;
+    return 0;
+}
 
 pub export fn sysSocket(family:u32, ptype:u32, proto:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
     _=&family;
@@ -420,7 +427,7 @@ pub export fn sysListen(fd:u32, _:u32) callconv(std.builtin.CallingConvention.Sy
     return 0;
 }
 
-fn doAccept(fd:u32) !i64 {
+fn doAccept(fd:u32, addr:?*SockAddr, _:u32) !i64 {
     const t = task.getCurrentTask();
     const f = t.fs.getFile(fd) orelse return -1;
     const sk:*Sock = @alignCast(@ptrCast(f.ctx.?));
@@ -432,12 +439,18 @@ fn doAccept(fd:u32) !i64 {
     const file = try fs.File.get_new_ex(&sk_fops);
     file.ctx = new;
     t.fs.installFd(nfd, file);
+    if (addr) |a| {
+        if (new.dst_addr) |d| {
+            a.addr = @byteSwap(d.addr);
+            a.port = @byteSwap(d.port);
+        }
+    }
     return @intCast(nfd);
 
 }
 
-pub export fn sysAccept(fd:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
-    return doAccept(fd) catch return -1;
+pub export fn sysAccept(fd:u32, addr:?*SockAddr, adr_len:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    return doAccept(fd, addr, adr_len) catch return -1;
 }
 
 pub export fn sysConnect(fd:u32, addr:*const SockAddr, _:u32) callconv(std.builtin.CallingConvention.SysV) i64 {

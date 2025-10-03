@@ -51,18 +51,22 @@ comptime {
     \\ jnz 1f
     \\ push $0xaa 
     \\1:
+    \\ sti
     \\ call \func
+    \\ cli
     \\ pop \reg
     \\ cmp $0xaa, \reg 
     \\ jne 1f
     \\ pop \reg
     \\1:
     \\ mov \reg, %rsp // restore the stack after func call
+    \\ sti
     \\.endm
     \\
     \\.macro entry_call_return exit_func:req
     \\ mov %rsp, %rdi
     \\ call \exit_func
+    \\ cli
     \\restore_regs 
     \\ add $16, %rsp
     \\ iretq
@@ -72,7 +76,7 @@ comptime {
     \\save_regs \scret
     \\ mov $0, %rbp // stop stack unwinding for interrupt handler?
     \\ mov %rsp, %rdi // *IntState
-    \\ mov 128(%rsp), %rsi // vector, keep async with IntState 
+    \\ mov 128(%rsp), %rsi // vector, keep sync with IntState 
     \\ align_stack_call \func
     \\entry_call_return \exit_func 
     \\.endm

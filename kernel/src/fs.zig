@@ -356,16 +356,14 @@ pub export fn sysFStat(fd:u32, st:*Stat) callconv(std.builtin.CallingConvention.
     //return mounted_fs.ops.stat(mounted_fs, file.path, st) catch return -1;
 }
 
-pub export fn sysClose(fd:i64) callconv(std.builtin.CallingConvention.SysV) i64 {
+pub export fn sysClose(fd:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
     const l = lock.cli();
     defer lock.sti(l);
-    const files = &task.getCurrentTask().fs.open_files;
-    if (fd < 0 or fd >= files.items.len) {
-        return -1;
-    }
-    const f = files.items[@intCast(fd)] orelse return -1;
-    files.items[@intCast(fd)] = null;
+    const tfs = task.getCurrentTask().fs;
+    const f = tfs.getFile(fd) orelse return -1;
+    tfs.uninstallFd(fd);
     f.put();
+    console.print("closed: {}\n", .{fd});
     return 0;
 }
 const F_DUPFD  =	0;
@@ -449,7 +447,7 @@ const IoVec = extern struct {
 pub export fn sysReadV(fd:u32, vec:[*]IoVec, vlen:usize) callconv(std.builtin.CallingConvention.SysV) i64 {
     const l = lock.cli();
     defer lock.sti(l);
-    const f = task.getCurrentTask().fs.open_files.items[fd] orelse return -1;
+    const f = task.getCurrentTask().fs.getFile(fd) orelse return -1;
     var len:i64 = -1;
     for (0..vlen) |v| {
         const vp = &vec[v];
@@ -461,6 +459,7 @@ pub export fn sysReadV(fd:u32, vec:[*]IoVec, vlen:usize) callconv(std.builtin.Ca
             break;
         }
     }
+    //console.print("readv len: {} from fd: {}, file: 0x{x}\n", .{len, fd, @as(u64, @intFromPtr(f))});
     return len;
 }
 
@@ -484,6 +483,7 @@ pub export fn sysChDir(path: [*:0]const u8) callconv(std.builtin.CallingConventi
     const len = std.mem.len(path);
     const fp = mounted_fs.ops.lookup(mounted_fs, path[0..len], 0, 0) 
         catch return -syscall.ENOENT;
+    if (fp.entry.type != .DIR) return -1;
     const t = task.getCurrentTask();
     const old = t.fs.cwd.?;
     t.fs.cwd = fp;
@@ -528,6 +528,7 @@ pub export fn sysOpen(path: [*:0]const u8, flags:u32, mode:u16) callconv(std.bui
     }
     const file = open(path, flags, mode) catch return -1;
     t.fs.installFd(fd, file);
+    //console.print("opened: {s} at: {}, addr: 0x{x}\n", .{path, fd, @as(u64, @intFromPtr(file))});
     return @intCast(fd);
 
 }
@@ -623,10 +624,11 @@ pub export fn sysSendFile(out_fd: u32, in_fd: u32, offset:*u64, count:u64) callc
 pub export fn sysRead(fd: u32, buf: [*]u8, len:u64) callconv(std.builtin.CallingConvention.SysV) i64 {
     const l = lock.cli();
     defer lock.sti(l);
-    const f = task.getCurrentTask().fs.open_files.items[fd] orelse return -1;
+    const f = task.getCurrentTask().fs.getFile(fd) orelse return -1;
     const r = read(f, buf[0..len]) catch {
         return -1;
     };
+    if (r==0) console.print("read from fd {}, file: 0x{x} returned 0\n", .{fd, @as(u64, @intFromPtr(f))});
     return @intCast(r);
 }
 
@@ -635,6 +637,9 @@ pub fn read(f:*File, buf:[]u8) !u64 {
         return err;
     };
     f.pos += r.len;
+    if (r.len == 0 and f.pos < f.size) {
+        std.debug.panic("BUG!!", .{});
+    }
     return r.len;
 }
 

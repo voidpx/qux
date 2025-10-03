@@ -61,7 +61,6 @@ comptime {
         \\.global syscall_entry
         \\.type syscall_entry, @function
         \\syscall_entry:
-        \\ cli
         \\ // save user stack to tss.sp2
         \\ mov %rsp,task.tss+20(%rip) 
         \\ // switch to kernel stack (tss.sp0)
@@ -74,7 +73,6 @@ comptime {
             \\ push %rcx
             \\ push $0
             \\ push %rax
-            \\ sti
             \\
             \\entry_call syscall, exit_call,  1
             \\  
@@ -122,7 +120,16 @@ export fn syscall(state: *idt.IntState, no: u64) callconv(std.builtin.CallingCon
           [r9] "{r9}" (state.r9),
           [r11] "{r11}" (f),
     );
+    //if (no == @intFromEnum(SysCallNo.sys_readv)) {
+    //    console.print("state:0x{x}, ret: {}\n", .{@as(u64, @intFromPtr(state)), ret});
+    //    if (ret == 0 ) {
+    //        console.print("readv returned 0\n", .{});
+    //    }
+    //}
     state.rax = ret;
+    //if (no == @intFromEnum(SysCallNo.sys_readv)) {
+    //    console.print("state:0x{x}, stat.rax: {}\n", .{@as(u64, @intFromPtr(state)), state.rax});
+    //}
 }
 
 // max number of sys calls

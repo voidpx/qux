@@ -830,7 +830,7 @@ fn switchTask(cur:*Task, to:*Task) void {
         mem.loadCR3(@intFromPtr(to.mem.pgd));
     }
     __switchTask(cur, to, &cur.sp, &to.sp);
-    finishTaskSwitch(null, null, switch_cli);
+    finishTaskSwitch(null, null, false);
 
 }
 
@@ -863,6 +863,7 @@ export fn finishTaskSwitch(
             const ret = fp(arg);
             _=&ret;
         }
+        // fork returns 0 for itself
         getCurrentState().rax = 0;
     }
 }

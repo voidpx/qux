@@ -9,7 +9,7 @@ pub const Con = struct {
 };
 
 pub var con:?*Con = null;
-const console_buf_len = 0x256;
+const console_buf_len = 256;
 var buffer = [_]u32{0} ** console_buf_len;
 pub var console_buf = RingBuffer.new(buffer[0..]);
 const input = @import("input.zig");
@@ -21,7 +21,7 @@ const task = @import("task.zig");
 var input_buf:InputBuffer = undefined;
 var input_wq:task.WaitQueue = .{};
 
-const input_buf_cap = 128;
+const input_buf_cap = 1024;
 
 pub var stdin:*fs.File = undefined;
 pub var stdout:*fs.File = undefined;

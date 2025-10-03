@@ -102,6 +102,8 @@ fn tcpSendTo(sk:*net.Sock, buf:[]const u8, _:?*const net.SockAddr) anyerror!usiz
 fn sendOne(tsk:*TcpSock, buf:[]const u8) !usize {
     const out = try ip.newPacket(@intCast(@sizeOf(TcpHdr) + buf.len)); 
     defer out.free();
+    const l = lock.cli();
+    defer lock.sti(l);
     sendPrepare(tsk, &tsk.sk.dst_addr.?, out);
     const tdata = out.getTransPacket();
     const th:*TcpHdr = @ptrCast(tdata.ptr);
@@ -507,7 +509,13 @@ fn handleRecv(ap:*const net.SockAddrPair, pkt:*net.Packet, th:*TcpHdr) !void {
     errdefer pkt.free();
     const sk = conn_map.get(.{.src = ap.dst, .dst = ap.src});
     if (sk) |ts| {
-        if (th.isFIN()) {
+        if (th.isSYN()) {
+            _=conn_map.remove(.{.src = ap.dst, .dst = ap.src});
+            task.wakeup(&ts.sk.rwq);
+            task.wakeup(&ts.sk.wwq);
+            task.schedule();
+            try handleRecv(ap, pkt, th);
+        } else if (th.isFIN()) {
             try recvFIN(ts, pkt);
         } else if (th.isRST()) {
             console.log("RST received from peer\n", .{});
