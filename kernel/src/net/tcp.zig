@@ -213,54 +213,54 @@ const TcpHdr = extern struct {
     }
 
 
-    fn getSrcPort(self:*@This()) u16 {
+    fn getSrcPort(self:*const @This()) u16 {
         return @byteSwap(self.sport);
     }
-    fn getDstPort(self:*@This()) u16 {
+    fn getDstPort(self:*const @This()) u16 {
         return @byteSwap(self.dport);
     }
-    fn getSum(self:*@This()) u16 {
+    fn getSum(self:*const @This()) u16 {
         return @byteSwap(self.csum);
     }
-    fn getSeq(self:*@This()) u32 {
+    fn getSeq(self:*const @This()) u32 {
         return @byteSwap(self.seq);
     }
-    fn getAck(self:*@This()) u32 {
+    fn getAck(self:*const @This()) u32 {
         return @byteSwap(self.ack);
     }
-    fn getHdrLen(self:*@This()) u8 {
+    fn getHdrLen(self:*const @This()) u8 {
         return (self.hlen_res>>4) * 4;
     }
-    fn getWinSize(self:*@This()) u16 {
+    fn getWinSize(self:*const @This()) u16 {
         return @byteSwap(self.win_size);
     }
 
-    fn isCWR(self:*@This()) bool {
+    fn isCWR(self:*const @This()) bool {
         return self.getFlag(7);
     }
-    fn isECE(self:*@This()) bool {
+    fn isECE(self:*const @This()) bool {
         return self.getFlag(6);
     }
-    fn isURG(self:*@This()) bool {
+    fn isURG(self:*const @This()) bool {
         return self.getFlag(5);
     }
-    fn isACK(self:*@This()) bool {
+    fn isACK(self:*const @This()) bool {
         return self.getFlag(4);
     }
-    fn isPSH(self:*@This()) bool {
+    fn isPSH(self:*const @This()) bool {
         return self.getFlag(3);
     }
-    fn isRST(self:*@This()) bool {
+    fn isRST(self:*const @This()) bool {
         return self.getFlag(2);
     }
-    fn isSYN(self:*@This()) bool {
+    fn isSYN(self:*const @This()) bool {
         return self.getFlag(1);
     }
-    fn isFIN(self:*@This()) bool {
+    fn isFIN(self:*const @This()) bool {
         return self.getFlag(0);
     }
 
-    fn getFlag(self:*@This(), shift:u3) bool {
+    fn getFlag(self:*const @This(), shift:u3) bool {
         return self.flags & (@as(u8, 1) << shift) > 0;
     }
     fn setFlag(self:*@This(), shift:u3, set:bool) void {
@@ -369,11 +369,12 @@ fn calcTcpSum(p_sum:u16, pkt:*net.Packet) void {
 }
 
 inline fn getTcpPktLen(th:*TcpHdr, in:*net.Packet) u32 {
-    if (th.isSYN) {
+    if (th.isSYN() or th.isFIN()) {
         return 1;
     }
-    const th_len = th.getHdrLen() * 4;
-    return in.getIpV4Hdr().getTotalLen() - th_len;
+    const iph = in.getIpV4Hdr();
+    const th_len = th.getHdrLen();
+    return iph.getTotalLen() - iph.getIHL() - th_len;
 }
 
 fn sendPrepare0(src_addr:*const net.SockAddr, dst_addr:*const net.SockAddr, out:*net.Packet) void {
@@ -433,6 +434,24 @@ fn getAddrPair(pkt:*net.Packet) net.SockAddrPair {
     };
 }
 
+fn sendSYNACK(new_sk:*TcpSock, ap:*const net.SockAddrPair) !void {
+    const len = @sizeOf(TcpHdr) + 4;
+    const out = try ip.newPacket(len); // MSS option
+    defer out.free();
+    sendPrepare(new_sk, &ap.src, out);
+    const out_th:*TcpHdr = @ptrCast(out.getTransPacket().ptr);
+    const opt_mss:[*]u8 = @as([*]u8, @ptrCast(out_th)) + @sizeOf(TcpHdr); 
+    opt_mss[0] = 2; // MSS kind
+    opt_mss[1] = 4; // length including kind, rest 2 bytes is MSS
+    @as(*align(1) u16, @ptrCast(opt_mss+2)).* = @byteSwap(MSS);
+
+    out_th.setHdrLen(len);
+    out_th.setSYN(true);
+    out_th.setACK(true);
+
+    try ip.ipSend(out, &calcTcpSum);
+}
+
 fn recvSYN(pkt:*net.Packet, ap:*const net.SockAddrPair) !void {
     const th:*TcpHdr = @ptrCast(pkt.getTransPacket().ptr);
     const lts = listen_map.get(ap.dst) orelse {
@@ -451,18 +470,7 @@ fn recvSYN(pkt:*net.Packet, ap:*const net.SockAddrPair) !void {
     new_sk.sk.dst_addr = ap.src;
     new_sk.seq = isn;
     new_sk.ack = th.getSeq() + 1;
-    sendPrepare(new_sk, &ap.src, out);
-    const out_th:*TcpHdr = @ptrCast(out.getTransPacket().ptr);
-    const opt_mss:[*]u8 = @as([*]u8, @ptrCast(out_th)) + @sizeOf(TcpHdr); 
-    opt_mss[0] = 2; // MSS kind
-    opt_mss[1] = 4; // length including kind, rest 2 bytes is MSS
-    @as(*align(1) u16, @ptrCast(opt_mss+2)).* = @byteSwap(MSS);
-
-    out_th.setHdrLen(len);
-    out_th.setSYN(true);
-    out_th.setACK(true);
-    
-    ip.ipSend(out, &calcTcpSum) catch |e| {
+    sendSYNACK(new_sk, ap) catch |e| {
         new_sk.sk.ops.release(&new_sk.sk);
         return e;
     };
@@ -475,12 +483,24 @@ fn recvSYN(pkt:*net.Packet, ap:*const net.SockAddrPair) !void {
 }
 
 fn sendACK(sk:?*TcpSock, pkt:*net.Packet, fin:bool) !void {
+    const thi:*TcpHdr = @ptrCast(pkt.getTransPacket().ptr);
     const out = try ip.newPacket(@sizeOf(TcpHdr));
     defer out.free();
     const ap = getAddrPair(pkt);
     sendPrepare0(&ap.dst, &ap.src, out);
     const th:*TcpHdr = @ptrCast(out.getTransPacket().ptr);
     th.setHdrLen(@sizeOf(TcpHdr));
+    const ack = @addWithOverflow(thi.getSeq(), getTcpPktLen(thi, pkt))[0]; 
+    if (sk) |s| {
+        th.setSeq(s.seq);
+        if (s.ack < thi.getSeq()) {
+            console.print("tcp packet received out of order\n", .{});
+            return;
+        } else if (s.ack == thi.getSeq()) {
+            s.ack = ack;
+        }
+    }
+    th.setAck(ack);
     th.setACK(true);
     if (fin) th.setFIN(true);
     try ip.ipSend(out, &calcTcpSum);
@@ -510,11 +530,15 @@ fn handleRecv(ap:*const net.SockAddrPair, pkt:*net.Packet, th:*TcpHdr) !void {
     const sk = conn_map.get(.{.src = ap.dst, .dst = ap.src});
     if (sk) |ts| {
         if (th.isSYN()) {
-            _=conn_map.remove(.{.src = ap.dst, .dst = ap.src});
-            task.wakeup(&ts.sk.rwq);
-            task.wakeup(&ts.sk.wwq);
-            task.schedule();
-            try handleRecv(ap, pkt, th);
+            if (ts.ack == th.getSeq() + 1) { // SYN retransmission
+                try sendSYNACK(ts, ap);
+            } else {
+                _=conn_map.remove(.{.src = ap.dst, .dst = ap.src});
+                task.wakeup(&ts.sk.rwq);
+                task.wakeup(&ts.sk.wwq);
+                task.schedule();
+                try handleRecv(ap, pkt, th);
+            }
         } else if (th.isFIN()) {
             try recvFIN(ts, pkt);
         } else if (th.isRST()) {
@@ -537,20 +561,18 @@ fn handleRecv(ap:*const net.SockAddrPair, pkt:*net.Packet, th:*TcpHdr) !void {
                     }
                 },
                 .ESTABLISHED => {
-                    const tdata = pkt.getTransPacket();
-                    const thlen = th.getHdrLen();
-                    const len = tdata.len - thlen;
+                    const len = getTcpPktLen(th, pkt);
                     if (len == 0) {
                         if (th.isACK()) { // pure ack
                             // TODO: remove the packet waiting in the retransmission queue
                         }
                         break :blk;
                     }
-                    const ack:u32 = @addWithOverflow(ts.ack, @as(u32, @truncate(len)))[0];
-                    if (ack != th.getSeq() + len) {
-                        //console.log("packet arrived out of order\n", .{});
+                    if (ts.ack < th.getSeq()) {
+                        console.log("packet arrived out of order\n", .{});
                         break :blk;
                     }
+                    const ack:u32 = @addWithOverflow(ts.ack, @as(u32, @truncate(len)))[0];
                     ts.ack = ack;
                     try sendACK(ts, pkt, false); 
                     ts.sk.rq.enqueue(pkt);

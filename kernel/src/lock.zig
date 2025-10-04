@@ -70,20 +70,14 @@ const mem = @import("mem.zig");
 const syscall = @import("syscall.zig");
 const FutexMap = std.AutoHashMap(u64, task.WaitQueue);
 var futex_map:FutexMap = undefined;
-pub export fn sysFutex(uaddr:*u32, op:i32, val:u32, utime:?*time.Time, uadd2:?*u32, val3:u32)
-    callconv(std.builtin.CallingConvention.SysV) i64 {
-    const l = cli();
-    defer sti(l);
+fn doFutex(uaddr:*u32, op:i32, val:u32, utime:?*time.Time, uadd2:?*u32, val3:u32) i64 {
     const t = task.getCurrentTask();
-    const addr:u64 = @intFromPtr(uaddr);
-    const p = t.mem.getPageForAddr(addr) orelse return -1;
-    const pa = p.getPhyAddr() + (addr & mem.page_mask);
     switch (op) {
         FUTEX_WAIT, FUTEX_WAIT_PRIVATE => {
-            return futexWait(uaddr, val, pa);
+            return futexWait(t, uaddr, val);
         },
         FUTEX_WAKE, FUTEX_WAKE_PRIVATE => {
-            return futexWake(pa);
+            return futexWake(t, uaddr);
         },
         else => {
             console.print("unsupported futex op: {}\n", .{op});
@@ -94,17 +88,32 @@ pub export fn sysFutex(uaddr:*u32, op:i32, val:u32, utime:?*time.Time, uadd2:?*u
     _=&uadd2;
     _=&val3;
     return 0;
+}
+pub export fn sysFutex(uaddr:*u32, op:i32, val:u32, utime:?*time.Time, uadd2:?*u32, val3:u32)
+    callconv(std.builtin.CallingConvention.SysV) i64 {
+    return doFutex(uaddr, op, val, utime, uadd2, val3);
 
 }
 
-fn futexWake(pa:u64) i64 {
+pub fn futexWake(t:*task.Task, uaddr:*u32) i64 {
+    const l = cli();
+    defer sti(l);
+    const addr:u64 = @intFromPtr(uaddr);
+    const p = t.mem.getPageForAddr(addr) orelse return -1;
+    const pa = p.getPhyAddr() + (addr & mem.page_mask);
     const wq = futex_map.getPtr(pa) orelse return 0;
     const c = wq.len;
     task.wakeup(wq);
     return @intCast(c);
 }
 
-fn futexWait(uaddr:*u32, val:u32, pa:u64) i64 {
+pub fn futexWait(t:*task.Task, uaddr:*u32, val:u32) i64 {
+    const l = cli();
+    defer sti(l);
+    console.print("task {} calling futexWait, 0x{x}, val: {}\n", .{t.id, @as(u64, @intFromPtr(uaddr)), val});
+    const addr:u64 = @intFromPtr(uaddr);
+    const p = t.mem.getPageForAddr(addr) orelse return -1;
+    const pa = p.getPhyAddr() + (addr & mem.page_mask);
     if (uaddr.* != val) return -syscall.EAGAIN; 
     const wq = futex_map.getPtr(pa) orelse blk:{
         futex_map.put(pa, .{}) catch return -1;

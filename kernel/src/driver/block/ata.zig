@@ -23,11 +23,11 @@ const bytes_per_sector:u32 = 512;
 
 var disk_capacity:u64 = 0;
 
-const io = @import("../io.zig");
+const io = @import("../../io.zig");
 const std = @import("std");
-const lock = @import("../lock.zig");
+const lock = @import("../../lock.zig");
 
-const blk = @import("block.zig");
+const blk = @import("../block.zig");
 fn ata_wait_busy() void {
     while ((io.in(u8, ATA_REG_STATUS) & 0x80) != 0) {}
 }
@@ -259,5 +259,5 @@ const PartTable = struct {
     parts:[4]PartEntry 
 };
 
-const console = @import("../console.zig");
+const console = @import("../../console.zig");
 

@@ -15,7 +15,6 @@
 #include <dirent.h>
 #include <pthread.h>
 
-#define DEBUG
 
 #define HTTP "HTTP/1.1"
 

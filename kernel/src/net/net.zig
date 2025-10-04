@@ -157,7 +157,7 @@ pub const IpV4Hdr = extern struct {
         return (self.ver_ihl & 0xf) * 4;
     }
 
-    pub fn getTotalLen(self:*@This()) u16 {
+    pub fn getTotalLen(self:*const @This()) u16 {
         return @byteSwap(self.total_len); 
     }
 

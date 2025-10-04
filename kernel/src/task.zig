@@ -362,6 +362,8 @@ pub const Task = struct {
     thread_link:TaskList.Node = .{.data = undefined},
     exit_listeners: TaskListenerList = .{},
     on_wq:?struct {q:*WaitQueue, n:*WaitQueue.Node} = null,
+    clear_child_tid:?*u32 = null,
+    robust_list:?*RobustListHead = null,
 
     pub fn registerExitListener(t:*@This(), l:*TaskListener) void {
         const f = lock.cli();
@@ -602,7 +604,9 @@ pub export fn sysGetPid() callconv(std.builtin.CallingConvention.SysV) i64 {
 }
 
 pub export fn sysExitGroup(status:i32) callconv(std.builtin.CallingConvention.SysV) noreturn {
-    taskExit(getCurrentTask(), @intCast(status));
+    const t = getCurrentTask();
+    const tg = getTask(t.pid);
+    if (tg) |g| taskExit(g, @intCast(status));
     unreachable;
 }
 
@@ -685,12 +689,25 @@ pub export fn sysArchPrctl(op:i32, option:u64) callconv(std.builtin.CallingConve
 }
 
 pub export fn sysSetTidAddr(addr:?*u32) callconv(std.builtin.CallingConvention.SysV) i64 {
-    _=&addr; // add this to Task
-    return getCurrentTask().id;
+    const t = getCurrentTask();
+    t.clear_child_tid = addr;
+    return t.id;
 }
 
-pub export fn sysSetRobustList(addr:u64, len:usize) callconv(std.builtin.CallingConvention.SysV) i64 {
-    _=&addr; // add this to Task
+const RobustList = extern struct {
+    next:?*RobustList = null,
+};
+
+const RobustListHead = extern struct {
+    list:RobustList = .{}, 
+    futex_off:u64 = 0,
+    list_op_pending:?*RobustList = null,
+};
+
+pub export fn sysSetRobustList(addr:?*RobustListHead, len:usize) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const t = getCurrentTask();
+    t.robust_list = addr;
+    console.print("set_robust_list: {}\n", .{addr.?.futex_off});
     _=&len;
     return -1;
 }
@@ -956,6 +973,10 @@ fn exitTask(t:*Task, code:u16) void {
         if (t.id == t.pid) { // not a thread
             p.sendSignal(.chld); //TODO: handle this
         }
+    }
+    if (t.clear_child_tid) |c| {
+        c.* = 0;
+        _=lock.futexWake(t, c);
     }
     wakeup(&t.exit_wq);
 }

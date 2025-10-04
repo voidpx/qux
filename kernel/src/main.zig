@@ -57,7 +57,8 @@ export fn startKernel(b: *bi.BootInfo) callconv(std.builtin.CallingConvention.Sy
     kthread.createUserThread("init", &initThread, null);
 
     kthread.createKThread("timer", &time.timerRoutine, null);
-    //task.startSchedRoutine();
+    task.startSchedRoutine();
+    // after process 1 was created
     netInit();
     //XXX: debug mem
     //kthread.createKThread("mem-watch", &printMemStat, null);
