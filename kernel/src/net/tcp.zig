@@ -40,6 +40,7 @@ fn tcpAccept(sk:*net.Sock) !*net.Sock {
             }
         }
         task.wait(&sk.rwq);
+        if (task.getCurrentTask().signal.signalPending()) return error.InterruptedError;
     }
 }
 
@@ -582,7 +583,7 @@ fn handleRecv(ap:*const net.SockAddrPair, pkt:*net.Packet, th:*TcpHdr) !void {
                 .LAST_ACK => {
                     if (th.getAck() == ts.seq) {
                         ts.state = .CLOSED;
-                        console.log("FIN ACKED\n", .{});
+                        //console.log("FIN ACKED\n", .{});
                     }
                     _=conn_map.remove(.{.src = ap.dst, .dst = ap.src});
                     task.wakeup(&ts.sk.rwq);

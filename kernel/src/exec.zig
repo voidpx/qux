@@ -47,7 +47,7 @@ pub fn init() void {
 pub export fn sysExecve(file: [*:0]const u8, argv:?[*:null]?[*:0]const u8,
     envp:?[*:null]?[*:0]const u8) callconv(std.builtin.CallingConvention.SysV) i64 {
     exec(file, argv, envp) catch |err| {
-        if (err == error.FileNotFound) return syscall.ENOENT;
+        if (err == error.FileNotFound) return -syscall.ENOENT;
         return -1;
     };
     return 0;
@@ -155,7 +155,7 @@ pub fn exec(file: [*:0]const u8, args:?[*:null]?[*:0]const u8, env:?[*:null]?[*:
             if (brk > mm.brk) mm.brk = brk;
         }
         if (n.p_type == elf.PT_TLS) {
-            mm.fsbase = n.p_vaddr;
+            cur.fsbase = n.p_vaddr;
             msr.wrmsr(msr.MSR_FS_BASE, n.p_vaddr);
         }
     }

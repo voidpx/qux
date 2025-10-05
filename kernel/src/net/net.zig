@@ -450,7 +450,10 @@ fn doAccept(fd:u32, addr:?*SockAddr, _:u32) !i64 {
 }
 
 pub export fn sysAccept(fd:u32, addr:?*SockAddr, adr_len:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
-    return doAccept(fd, addr, adr_len) catch return -1;
+    return doAccept(fd, addr, adr_len) catch |e| {
+        if (e == error.InterruptedError) return -syscall.EAGAIN;
+        return -1;
+    };
 }
 
 pub export fn sysConnect(fd:u32, addr:*const SockAddr, _:u32) callconv(std.builtin.CallingConvention.SysV) i64 {

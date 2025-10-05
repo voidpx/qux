@@ -363,7 +363,7 @@ pub export fn sysClose(fd:u32) callconv(std.builtin.CallingConvention.SysV) i64 
     const f = tfs.getFile(fd) orelse return -1;
     tfs.uninstallFd(fd);
     f.put();
-    console.print("closed: {}\n", .{fd});
+    //console.print("closed: {}\n", .{fd});
     return 0;
 }
 const F_DUPFD  =	0;

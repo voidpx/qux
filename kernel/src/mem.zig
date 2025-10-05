@@ -178,10 +178,10 @@ const task = @import("task.zig");
 fn handlePageFault(state: *idt.IntState) void {
     const t = task.getCurrentTask();
     const cr2 = asm volatile("mov %cr2, %rax" : [cr2] "={rax}" (->u64));
-    const cr3 = asm volatile("mov %cr3, %rax" : [cr3] "={rax}" (->u64));
-    const cr4 = asm volatile("mov %cr4, %rax" : [cr4] "={rax}" (->u64));
-    console.print("page fault: err code:{}, cr2:0x{x}, cr3:0x{x}, cr4:0x{x}, ip:0x{x}, task:{}\n", 
-    .{state.err_code, cr2, cr3, cr4, state.rip, t.id});
+    //const cr3 = asm volatile("mov %cr3, %rax" : [cr3] "={rax}" (->u64));
+    //const cr4 = asm volatile("mov %cr4, %rax" : [cr4] "={rax}" (->u64));
+    //console.print("page fault: err code:{}, cr2:0x{x}, cr3:0x{x}, cr4:0x{x}, ip:0x{x}, task:{}\n", 
+    //.{state.err_code, cr2, cr3, cr4, state.rip, t.id});
     //std.debug.panic("page fault", .{});
 
     const l = lock.cli();
@@ -195,7 +195,9 @@ fn handlePageFault(state: *idt.IntState) void {
         console.print("error handling page fault, {any}\n", .{err});
         std.debug.panic("unable to handle page fault", .{});
     }; 
-    console.print("page fault handled at, 0x{x}\n", .{v.start});
+    _=&v;
+    _=&state;
+    //console.print("page fault handled at, 0x{x}\n", .{v.start});
 }
 
 pub fn getUserVmPage(pgd:*PageTable, addr:u64) ?*Page {

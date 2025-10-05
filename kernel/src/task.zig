@@ -62,8 +62,6 @@ pub const Mem = struct {
     pgd:*mem.PageTable = undefined,
     vm: VmList = .{},
     brk:u64 = 0,
-    fsbase:u64 = 0,
-    gsbase:u64 = 0,
 
     fn available(m: *@This(), size: u64) u64 {
         var it = m.vm.inorderIterator();
@@ -184,8 +182,6 @@ pub const Mem = struct {
         const pgd = try mem.clonePageTable(this.pgd);
         var new = try get_new(pgd);
         new.brk = this.brk;
-        new.fsbase = this.fsbase;
-        new.gsbase = this.gsbase;
         var it = this.vm.inorderIterator();
         while (it.next()) |n| {
             const v:*VmRange= @alignCast(@ptrCast(n.key));
@@ -350,6 +346,8 @@ pub const Task = struct {
     parent:?*Task = null,
     children:TaskList = .{},
     mem:*Mem,
+    fsbase:u64 = 0,
+    gsbase:u64 = 0,
     name:[32]u8 = undefined,
     name_len:usize = 0,
     sp:u64 = 0,
@@ -565,12 +563,13 @@ pub export fn sysFork() callconv(std.builtin.CallingConvention.SysV) i64 {
 pub export fn sysClone(flags:u64, sp:u64, ptid:?*u32, ctid:?*u32, tls:u64) callconv(std.builtin.CallingConvention.SysV) i64 {
     //console.print("clone, flags:0x{x}, sp:0x{x}, ptdi:0x{x}, ctid:0x{x}, tls:0x{x}\n", .{flags, sp, 
     //    if (ptid) |p| @intFromPtr(p) else 0, if (ctid) |p| @intFromPtr(p) else 0, tls});
-    _=&ptid;
-    _=&ctid;
-    _=&tls;
     const ca = CloneArgs{
         .ustack = sp,
-        .flags = flags
+        .flags = flags,
+        .tls = tls,
+        .ptid = ptid,
+        .ctid = ctid,
+
     };
     const pid = (clone(&ca) catch return -1).id;
     return pid;
@@ -606,7 +605,11 @@ pub export fn sysGetPid() callconv(std.builtin.CallingConvention.SysV) i64 {
 pub export fn sysExitGroup(status:i32) callconv(std.builtin.CallingConvention.SysV) noreturn {
     const t = getCurrentTask();
     const tg = getTask(t.pid);
-    if (tg) |g| taskExit(g, @intCast(status));
+    if (tg) |g| {
+        taskExit(g, @intCast(status<<8));
+        t.state = .dead;
+        schedule();
+    }
     unreachable;
 }
 
@@ -673,11 +676,13 @@ const ARCH_GET_FS =0x1003;
 const ARCH_GET_GS =0x1004;
 const msr = @import("msr.zig");
 pub export fn sysArchPrctl(op:i32, option:u64) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const l = lock.cli();
+    defer lock.sti(l);
     switch (op) {
         ARCH_SET_FS=> {
             //asm volatile("movw $0, %fs");
             //console.print("ARCH_SET_FS:0x{x}\n", .{option});
-            getCurrentTask().mem.fsbase = option;
+            getCurrentTask().fsbase = option;
             msr.wrmsr(msr.MSR_FS_BASE, option);
         },
         else => unreachable
@@ -757,6 +762,8 @@ pub const CloneArgs = struct {
     ustack: u64 = 0, // user stack
     flags: u64 = 0,
     tls: u64 = 0,
+    ptid:?*u32 = null,
+    ctid:?*u32 = null,
     pub fn new(flags:u64) CloneArgs {
         return .{.flags = flags};
     }
@@ -866,8 +873,8 @@ export fn finishTaskSwitch(
     func:?*anyopaque, arg:?*anyopaque, new:bool) 
     callconv(std.builtin.CallingConvention.SysV) void {
     const t = getCurrentTask();
-    msr.wrmsr(msr.MSR_FS_BASE, t.mem.fsbase);
-    msr.wrmsr(msr.MSR_GS_BASE, t.mem.gsbase);
+    msr.wrmsr(msr.MSR_FS_BASE, t.fsbase);
+    msr.wrmsr(msr.MSR_GS_BASE, t.gsbase);
     tss.sp0 = getCurrentSP0();
     if (new) {
         switch_cli = true;
@@ -949,7 +956,7 @@ fn pickTask() *Task {
 
 
 pub export fn sysExit(code: u16) callconv(std.builtin.CallingConvention.SysV) void {
-    taskExit(getCurrentTask(), code);
+    taskExit(getCurrentTask(), code<<8);
 }
 
 fn exitTask(t:*Task, code:u16) void {
@@ -960,7 +967,7 @@ fn exitTask(t:*Task, code:u16) void {
            exitTask(n.data, code); 
         }
     } else {
-        console.print("thread exit: {}\n", .{t.id});
+        //console.print("thread exit: {}\n", .{t.id});
     }
     t.exit_code = code;
     t.state = .dead;
@@ -976,7 +983,9 @@ fn exitTask(t:*Task, code:u16) void {
     }
     if (t.clear_child_tid) |c| {
         c.* = 0;
-        _=lock.futexWake(t, c);
+        if (getCurrentTask() == t) {
+            _=lock.futexWake(t, c);
+        }
     }
     wakeup(&t.exit_wq);
 }
@@ -984,7 +993,8 @@ fn exitTask(t:*Task, code:u16) void {
 pub fn taskExit(t:*Task, code: u16) callconv(std.builtin.CallingConvention.SysV) void {
     const cur = getCurrentTask();
     if (t != cur) {
-        t.sendSignal(.int);
+        t.exit_code = code;
+        t.sendSignal(.kill);
     } else {
         const v = lock.cli();
         exitTask(t, code);
@@ -1085,6 +1095,8 @@ fn taskRegs(t:*Task) *idt.IntState {
 /// preemption must be disabled when entering
 fn setupTask(a:*const CloneArgs, task:*Task, cur:*Task) !void {
     task.id = task_id;
+    if (a.ptid) |p| p.* = task_id;
+    if (a.ctid) |p| p.* = task_id;
     task_id += 1;
     task.child_link = .{.data = task};
     task.children = .{};
@@ -1144,7 +1156,7 @@ fn setupTask(a:*const CloneArgs, task:*Task, cur:*Task) !void {
             proc.threads.append(&task.thread_link);
         }
         if (a.tls != 0) {
-            task.mem.fsbase = a.tls;
+            task.fsbase = a.tls;
         }
     }
     task.list = .{.prev = null, .next = null, .data = task};

@@ -20,6 +20,9 @@ pub const TaskSignal = struct {
     sig_actions:[64]SigAction = .{SigAction{}}**64,
     in_signal:types.AtomicBool = types.AtomicBool.init(false),
 
+    pub fn signalPending(t:*@This()) bool {
+        return t.sig > 0;
+    }
     pub fn signalOn(t:*@This(), s: Signal) bool {
         const bit = @as(u64, 1) << @truncate(@intFromEnum(s) - 1);
         if (t.mask_set & bit > 0) return false;
@@ -154,14 +157,14 @@ fn handleSignal(s:i32) void {
     const handler = act.handler orelse {
         if (t.id > 1) {
             //console.print("no handler for signal {}, kill task:0x{x}\n", .{s, @as(u64, @intFromPtr(t))});
-            task.taskExit(t, 1); 
+            task.taskExit(t, @intCast(s)); 
             unreachable;
         }
         // init process, ignore sig
         _=task.getCurrentTask().signal.in_signal.cmpxchgWeak(true, false, .acquire, .monotonic);
         return;
     };
-    //console.print("handling signal {}, task:{}\n", .{s, t.id});
+    //console.print("handling signal {}, task:{s}\n", .{s, t.name});
     const regs = task.getCurrentState();
     const fsp = std.mem.alignBackward(u64, regs.rsp - 128 - @sizeOf(SigFrame), 16);
     const sigframe:*SigFrame = @ptrFromInt(fsp);
@@ -190,7 +193,6 @@ fn handleSignal(s:i32) void {
     sigframe.context.ip = regs.rip;
     sigframe.context.cs = @intCast(regs.cs);
     sigframe.context.gs = 0;
-    //sigframe.context.fs = @intCast(t.mem.fsbase);
     sigframe.context.ss = @intCast(regs.ss);
     sigframe.sig_info.sig_no = s;
     sigframe.sig_info.sig_errno = 0;
@@ -280,19 +282,15 @@ pub export fn sysRseq(addr:u64, len:u32, flags:i32, s:u32) callconv(std.builtin.
 
 pub export fn sysKill(pid:i32, s:i32) callconv(std.builtin.CallingConvention.SysV) i64 {
     if (task.getTask(@intCast(pid))) |t| { // TODO: handle signals
-       task.taskExit(t, 0); 
+        t.sendSignal(@enumFromInt(s));
     }
-    // TODO: not implemented
-    //taskExit(0);
-    _=&pid;
-    _=&s;
     return 0;
 }
 
 pub export fn sysTKill(tid:u32, s:i32) callconv(std.builtin.CallingConvention.SysV) i64 {
-    task.taskExit(task.getTask(tid).?, 0);
-    _=&tid;
-    _=&s;
+    if (task.getTask(@intCast(tid))) |t| { // TODO: handle signals
+        t.sendSignal(@enumFromInt(s));
+    }
     return 0;
 }
 const task = @import("task.zig");

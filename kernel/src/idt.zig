@@ -179,7 +179,7 @@ pub fn registerExceptionHandler(vec:u64, handler:?*const fn(*IntState) void) voi
 }
 
 fn handleException(state: *IntState, vec:u64) void {
-    console.print("exception: 0x{x}, rip: 0x{x}\n", .{vec, state.rip});
+    //console.print("exception: 0x{x}, rip: 0x{x}\n", .{vec, state.rip});
     if (exception_handlers[vec]) |h| {
         h(state);
     } else {

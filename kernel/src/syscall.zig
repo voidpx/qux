@@ -85,22 +85,13 @@ const sig = @import("signal.zig");
 /// interrupt/syscall exit call
 pub export fn exit_call(state: *idt.IntState) callconv(std.builtin.CallingConvention.SysV) void {
     const t = task.getCurrentTask();
+    const regs = task.getCurrentState();
+    if (t.id > 0 and regs == state and regs.rsp != 0) { // kernel thread has rsp==0 
+        sig.handleSignals(task.getCurrentTask());
+    }
     if (t.needResched()) {
         task.schedule();
-    }    // handle signal here
-    if (t.id == 0) return;
-    const regs = task.getCurrentState();
-    if (regs != state or regs.rsp == 0) { // syscall/isr interrupted, don't handle signal
-        //if (regs.syscall_no >= 0) {
-        //    const sc:SysCallNo = @enumFromInt(regs.syscall_no);
-        //    console.print("syscall {} interrupted\n", .{sc});
-        //} else {
-        //    const ex = regs.vector;
-        //    console.print("exception/interrupt 0x{x} interrupted\n", .{ex});
-        //}
-        return;
-    }
-    sig.handleSignals(task.getCurrentTask());
+    } 
 }
 
 export fn syscall(state: *idt.IntState, no: u64) callconv(std.builtin.CallingConvention.SysV) void {
