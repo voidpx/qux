@@ -110,6 +110,7 @@ fn ensureBind(sk:*net.Sock) !void {
 }
 
 fn udpSendTo(sk:*net.Sock, buf:[]const u8, to:?*const net.SockAddr) !usize {
+    if (buf.len > 1472) return error.PacketTooLarge;
     const raddr = to orelse return error.NullRemoteAddress; 
     const addr:net.SockAddr = .{.addr = @byteSwap(raddr.addr), .port = @byteSwap(raddr.port)};
     try ensureBind(sk);

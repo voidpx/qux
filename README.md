@@ -23,10 +23,10 @@ Qux is a toy operating system for x64 written in zig.
 - [x] basic ELF loader
 - [x] use dash (recompiled with musl-gcc as static executable) as the shell
 - [x] can run doom(doomgeneric), kind of :), key handling is still to be done
+- [x] network stack: TCP, UDP, ICMP(ping), a simple webserver included
 
 ### TODO
 
-- [ ] network stack
 - [ ] SMP support
 - [ ] more syscalls
 - [ ] implement dynamic loading so that linux programs can run without recompiling??
