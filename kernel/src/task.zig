@@ -461,6 +461,7 @@ pub var tss = gdt.Tss{};
 const mem = @import("mem.zig");
 var init_mem:Mem = .{};
 const syscall = @import("syscall.zig");
+
 pub fn init() void {
     tss.io_map_base = @sizeOf(@TypeOf(tss)); // io mapping not used
     gdt.loadTSS(&tss);
@@ -501,6 +502,7 @@ pub fn init() void {
     syscall.registerSysCall(syscall.SysCallNo.sys_wait4, &sysWait4);
 
     sig.init();
+
 }
 
 pub export fn sysWait4(pid:i32, status:?*i32, option:i32, ru:?*anyopaque) callconv(std.builtin.CallingConvention.SysV) i64 {
@@ -776,27 +778,30 @@ pub fn getTotalTasks() usize {
     return task_list.len;
 }
 
-// DEBUG
 const runq_min_cap:u32 = 8;
-//pub fn reapTasks() void {
-//    const v = lock.cli();
-//    defer lock.sti(v);
-//    var n = task_list.first;
-//    while (n) |t| {
-//        const next = t.next;
-//        const proc = t.data;
-//        if (proc.state == .dead) {
-//            console.print("reaping dead task {s}\n", .{proc.getName()});
-//            task_list.remove(t);
-//            // TODO: re-parent children
-//            proc.die();
-//        }
-//        n = next;
-//    }
-//    if (runq.len < runq.capacity() / 2) {
-//        runq.shrinkAndFree(@min(@max(runq.len, runq_min_cap), runq.capacity()));
-//    }
-//}
+
+var auto_reap_list:TaskList = .{};
+var auto_reap_wq:WaitQueue = .{};
+
+pub fn autoReapTasks(_:?*anyopaque) u16 {
+    const v = lock.cli();
+    defer lock.sti(v);
+    while (true) {
+        while(auto_reap_list.popFirst()) |n| {
+            const proc = n.data;
+            if (proc.state == .dead) {
+                //console.print("reaping dead thread {s}\n", .{proc.getName()});
+                proc.die();
+            }
+        } else {
+            wait(&auto_reap_wq);
+        }
+        //if (runq.len < runq.capacity() / 2) {
+        //    runq.shrinkAndFree(@min(@max(runq.len, runq_min_cap), runq.capacity()));
+        //}
+
+    }
+}
 
 pub const TaskStack = [task_stack_size]u8; 
 inline fn dupTask(cur:*Task) !*Task {
@@ -961,10 +966,13 @@ pub export fn sysExit(code: u16) callconv(std.builtin.CallingConvention.SysV) vo
 
 fn exitTask(t:*Task, code:u16) void {
     if (t.state == .dead) return;
-    if (t.id == t.pid) { // the process
+    const is_thread = t.id != t.pid;
+    if (!is_thread) { // the process
         //console.print("process exit: {}\n", .{t.id});
-        while (t.threads.popFirst()) |n| {
-           exitTask(n.data, code); 
+        var n = t.threads.first;
+        while (n) |nt| {
+            exitTask(nt.data, code); 
+            n = nt.next;
         }
     } else {
         //console.print("thread exit: {}\n", .{t.id});
@@ -977,17 +985,23 @@ fn exitTask(t:*Task, code:u16) void {
     }
     if (t.parent) |p| {
         p.children.remove(&t.child_link);
-        if (t.id == t.pid) { // not a thread
+        if (!is_thread) { // not a thread
             p.sendSignal(.chld); //TODO: handle this
         }
     }
     if (t.clear_child_tid) |c| {
         c.* = 0;
-        if (getCurrentTask() == t) {
+        if (getCurrentTask().pid == t.pid) {
             _=lock.futexWake(t, c);
         }
     }
     wakeup(&t.exit_wq);
+    if (is_thread) {
+        task_list.remove(&t.list);
+        auto_reap_list.append(&t.list);
+        t.parent.?.threads.remove(&t.child_link);
+        wakeup(&auto_reap_wq);
+    }
 }
 
 pub fn taskExit(t:*Task, code: u16) callconv(std.builtin.CallingConvention.SysV) void {

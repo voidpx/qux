@@ -1,5 +1,6 @@
 const std = @import("std");
 const console = @import("console.zig");
+const lock = @import("lock.zig");
 const idt = @import("idt.zig");
 const bi = @import("bootinfo.zig");
 const cpu = @import("cpu.zig");
@@ -22,6 +23,7 @@ const font = @import("ui/font.zig");
 const fbcon = @import("ui/fbcon.zig");
 const rand = @import("random.zig");
 const ipc = @import("ipc.zig");
+const kthread = @import("kthread.zig");
 
 export fn startKernel(b: *bi.BootInfo) callconv(std.builtin.CallingConvention.SysV) void {
     cpu.enableSSE() catch unreachable;
@@ -58,6 +60,7 @@ export fn startKernel(b: *bi.BootInfo) callconv(std.builtin.CallingConvention.Sy
 
     kthread.createKThread("timer", &time.timerRoutine, null);
     task.startSchedRoutine();
+    kthread.createKThread("auto_reap", &task.autoReapTasks, null);
     // after process 1 was created
     netInit();
     //XXX: debug mem
@@ -117,21 +120,21 @@ fn runShell(_:?*anyopaque) u16 {
     return 0;
 }
 
-const lock = @import("lock.zig");
-const kthread = @import("kthread.zig");
-fn reaper(_:?*anyopaque) u16 {
-    var cur = task.getCurrentTask();
-    while (true) {
-        // do reaping
-        const v = lock.cli();
-        task.reapTasks();
-        cur.state = .blocked;
-        lock.sti(v);
-        task.schedule();
-    }
-    unreachable;
-
-}
+//const lock = @import("lock.zig");
+//const kthread = @import("kthread.zig");
+//fn reaper(_:?*anyopaque) u16 {
+//    var cur = task.getCurrentTask();
+//    while (true) {
+//        // do reaping
+//        const v = lock.cli();
+//        task.reapTasks();
+//        cur.state = .blocked;
+//        lock.sti(v);
+//        task.schedule();
+//    }
+//    unreachable;
+//
+//}
 
 fn initThread(_:?*anyopaque) u16 {
    //     const m = mem.getMemStat();
