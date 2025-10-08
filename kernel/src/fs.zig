@@ -628,7 +628,7 @@ pub export fn sysRead(fd: u32, buf: [*]u8, len:u64) callconv(std.builtin.Calling
     const r = read(f, buf[0..len]) catch {
         return -1;
     };
-    if (r==0) console.print("read from fd {}, file: 0x{x} returned 0\n", .{fd, @as(u64, @intFromPtr(f))});
+    //if (r==0) console.print("read from fd {}, file: 0x{x} returned 0\n", .{fd, @as(u64, @intFromPtr(f))});
     return @intCast(r);
 }
 

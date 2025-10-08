@@ -86,7 +86,7 @@ pub const PacketQueue = struct {
 };
 
 pub const ProtoFamily = struct {
-    new_sock:*const fn() anyerror!*Sock,
+    new_sock:*const fn(proto:u32) anyerror!*Sock,
     
 };
 pub const SockOps = struct {
@@ -325,11 +325,13 @@ fn receive_pkt(a:?*anyopaque) u16 {
         const r = proto_map.get(p.getNetProto()) orelse {
             console.print("unknown network protocol: 0x{x}", .{@intFromEnum(p.getNetProto())});
             printPacket(p);
+            p.free();
             continue;
         };
         r.recv(r, p) catch |e| {
             console.print("error receiving packet, error:{}", .{e});
-            printPacket(p);
+            // p was already freed!!
+            //printPacket(p);
         };
     }
 }
@@ -401,7 +403,7 @@ pub export fn sysSocket(family:u32, ptype:u32, proto:u32) callconv(std.builtin.C
     const t = task.getCurrentTask();
     const fd = t.fs.getFreeFd() catch return -1;
     const nf = sock_map.get(@enumFromInt(ptype)) orelse return -1;
-    const sk = nf.new_sock() catch return -1;
+    const sk = nf.new_sock(proto) catch return -1;
     const file = fs.File.get_new_ex(&sk_fops) catch {
         sk.ops.release(sk);
         return -1;
@@ -474,7 +476,12 @@ pub export fn sysSend(fd:u32, buf:[*]u8, len:usize, _:u32) callconv(std.builtin.
 pub export fn sysRecv(fd:u32, buf:[*]u8, len:usize, _:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
     const t = task.getCurrentTask();
     const f = t.fs.getFile(fd) orelse return -1;
-    const r = (read(f, buf[0..len]) catch return -1).len;
+    const r = (read(f, buf[0..len]) catch |e| {
+        if (e == error.InterruptedError) {
+            return -syscall.EINTR;
+        }
+        return -1;
+    }).len;
     return @intCast(r);
 }
 
@@ -491,6 +498,12 @@ pub export fn sysRecvFrom(fd:u32, buf:[*]u8, len:usize, _:u32, addr:?*SockAddr, 
     const t = task.getCurrentTask();
     const f = t.fs.getFile(fd) orelse return -1;
     const sk:*Sock = @alignCast(@ptrCast(f.ctx.?));
-    const r = (sk.ops.recv_from(sk, buf[0..len], addr) catch return -1).len;
+    const r = (sk.ops.recv_from(sk, buf[0..len], addr) catch |e| { 
+        if (e == error.InterruptedError) {
+            return -syscall.EINTR;
+        }
+        return -1;
+
+    }).len;
     return @intCast(r);
 }

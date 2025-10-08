@@ -1,3 +1,4 @@
+const time = @import("time.zig");
 pub const SigFrame = extern struct {
     ret_addr:u64,
     flags:u64,
@@ -14,11 +15,13 @@ pub const SigFrame = extern struct {
 };
 
 const types = @import("lib/types.zig");
+
 pub const TaskSignal = struct {
     sig:u64 = 0,
     mask_set:u64 = 0,
     sig_actions:[64]SigAction = .{SigAction{}}**64,
     in_signal:types.AtomicBool = types.AtomicBool.init(false),
+    timer:?time.Timer = null,
 
     pub fn signalPending(t:*@This()) bool {
         return t.sig > 0;
@@ -156,9 +159,12 @@ fn handleSignal(s:i32) void {
     const act = t.signal.sig_actions[@intCast(s)];
     const handler = act.handler orelse {
         if (t.id > 1) {
-            //console.print("no handler for signal {}, kill task:0x{x}\n", .{s, @as(u64, @intFromPtr(t))});
-            task.taskExit(t, @intCast(s)); 
-            unreachable;
+            if (s != @intFromEnum(Signal.cont)) {
+                //console.print("no handler for signal {}, kill task:0x{x}\n", .{s, @as(u64, @intFromPtr(t))});
+                task.taskExit(t, @intCast(s)); 
+                unreachable;
+            }
+            t.signal.clearSignal(.cont);
         }
         // init process, ignore sig
         _=task.getCurrentTask().signal.in_signal.cmpxchgWeak(true, false, .acquire, .monotonic);
@@ -281,7 +287,11 @@ pub export fn sysRseq(addr:u64, len:u32, flags:i32, s:u32) callconv(std.builtin.
 }
 
 pub export fn sysKill(pid:i32, s:i32) callconv(std.builtin.CallingConvention.SysV) i64 {
-    if (task.getTask(@intCast(pid))) |t| { // TODO: handle signals
+    var id = pid;
+    if (id < -1) {
+        id = -id;
+    }
+    if (task.getTask(@intCast(id))) |t| { // TODO: handle signals
         t.sendSignal(@enumFromInt(s));
     }
     return 0;

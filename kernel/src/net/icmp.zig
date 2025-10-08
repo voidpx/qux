@@ -1,49 +1,76 @@
+const task = @import("../task.zig");
+const lock = @import("../lock.zig");
 const ip = @import("ip.zig");
 const net = @import("net.zig");
 const std = @import("std");
+const alloc = @import("../mem.zig").allocator;
 var icmp_recv:net.NetReceiver = .{.recv = &icmpRecv};
 const console = @import("../console.zig");
 
-const ICMPHdr = extern struct {
+const SockMap = std.AutoHashMap(u16, *net.Sock);
+var icmp_sk:SockMap = undefined;
+
+pub const ICMPHdr = extern struct {
     type:u8 align(1),
     code:u8 align(1),
     csum:u16 align(1),
 };
 
+pub const ICMPEcho = extern struct {
+    hdr:ICMPHdr,
+    id:u16 align(1),
+    seq:u16 align(1)
+};
+
 pub fn init() void {
     ip.registerTransProto(net.TransProto.ICMP, &icmp_recv) catch unreachable; 
+    icmp_sk = SockMap.init(alloc);
 
 }
 
+pub fn addIcmpSk(id:u16, sk:*net.Sock) !void {
+    if (icmp_sk.contains(id)) return error.IcmpIdUnavailable;
+    try icmp_sk.put(id, sk);
+}
+
+pub fn removeIcmpSk(id:u16) void {
+    _=icmp_sk.remove(id);
+}
+
 pub fn icmpRecv(nr:*net.NetReceiver, pkt:*net.Packet) !void {
-    defer pkt.free();
     _=&nr;
+    const l = lock.cli();
+    defer lock.sti(l);
+    errdefer pkt.free();
     //console.print("icmp packet received:{s}\n", .{std.fmt.fmtSliceHexLower(pkt.getRaw())});
     const iphdr:[*]u8 = @ptrCast(pkt.getIpV4Hdr());
     const icmp_hdr:*ICMPHdr = @ptrCast(iphdr + @sizeOf(net.IpV4Hdr));
     //console.print("iphdr:{s}\n", .{std.fmt.fmtSliceHexLower(iphdr[0..@sizeOf(net.IpV4Hdr)])});
-    try icmpReply(pkt.getIpV4Hdr(), icmp_hdr, pkt); 
-
+    const it:ICMPType = @enumFromInt(icmp_hdr.type);
+    switch (it) {
+        .ECHO_REQ => {
+            try icmpEchoReply(pkt.getIpV4Hdr(), icmp_hdr, pkt);
+        },
+        .ECHO_REP => {
+            const icmp_echo:*ICMPEcho = @ptrCast(@as([*]u8, @ptrCast(icmp_hdr)));
+            const sk = icmp_sk.get(@byteSwap(icmp_echo.id)) orelse return error.NoListeningSock;
+            sk.rq.enqueue(pkt); 
+            task.wakeup(&sk.rwq);
+            return;
+        },
+        else =>{
+            console.print("unknown icmp type:{}\n", .{icmp_hdr.type});
+        }
+    }
+    pkt.free();
 }
 
-const ICMPType = enum(u8) {
+pub const ICMPType = enum(u8) {
     ECHO_REQ = 8,
-    EHCO_REP = 0,
+    ECHO_REP = 0,
     DST_UNREACH = 3,
     _
 };
-
-fn icmpReply(iph:*net.IpV4Hdr, hdr:*ICMPHdr, pkt:*net.Packet) !void {
-    const it:ICMPType = @enumFromInt(hdr.type);
-    switch (it) {
-        .ECHO_REQ => {
-            try icmpEchoReply(iph, hdr, pkt);
-        },
-        else =>{
-            console.print("unknown icmp type:{}\n", .{hdr.type});
-        }
-    }
-}
 
 pub fn icmpReplyPortUnreachable(src:*net.Packet, dst:u32) !void {
     const np = src.getNetPacket(); 
@@ -88,7 +115,7 @@ fn icmpEchoReply(iph:*net.IpV4Hdr, hdr:*ICMPHdr, _:*net.Packet) !void {
     const data:[*]u8 = @ptrCast(hdr);
     const out_data:[*]u8 = @ptrCast(out_icmp_hdr);
     @memcpy(out_data[0..plen], data[0..plen]);
-    out_icmp_hdr.type = @intFromEnum(ICMPType.EHCO_REP); // reply
+    out_icmp_hdr.type = @intFromEnum(ICMPType.ECHO_REP); // reply
     try icmpSend(out, iph.getSrcAddr());
 }
 

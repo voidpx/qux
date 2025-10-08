@@ -185,7 +185,8 @@ fn handleException(state: *IntState, vec:u64) void {
     } else {
        const regs = state; 
         console.log("error code:{}\n", .{state.err_code});
-     console.print("regs: r15:{x}, r14:{x}, r13:{x}, r12:{x}, rbp:{x}, rbx:{x}, r11:{x}, r10:{x}, r9:{x}, r8:{x}, rax:{x}, rcx:{x}, rdx:{x}, rsi:{x}, rdi:{x}, rflags:0x{x}\n", .{ regs.r15, regs.r14, regs.r13, regs.r12, regs.rbp, regs.rbx, regs.r11, regs.r10, regs.r9, regs.r8, regs.rax, regs.rcx, regs.rdx, regs.rsi, regs.rdi, regs.rflags });
+     console.print("regs: rip:0x{x}, r15:{x}, r14:{x}, r13:{x}, r12:{x}, rbp:{x}, rbx:{x}, r11:{x}, r10:{x}, r9:{x}, r8:{x}, rax:{x}, rcx:{x}, rdx:{x}, rsi:{x}, rdi:{x}, rflags:0x{x}\n",
+        .{state.rip, regs.r15, regs.r14, regs.r13, regs.r12, regs.rbp, regs.rbx, regs.r11, regs.r10, regs.r9, regs.r8, regs.rax, regs.rcx, regs.rdx, regs.rsi, regs.rdi, regs.rflags });
         std.debug.panic("unhandled exeption: {}", .{vec});
     }
 }

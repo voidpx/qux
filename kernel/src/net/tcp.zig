@@ -64,7 +64,7 @@ fn tcpConnect(sk:*net.Sock, addr:*const net.SockAddr) !void {
     };
 }
 
-fn newTcpSock() !*net.Sock {
+fn newTcpSock(_:u32) !*net.Sock {
     const sk = try TcpSock.new();
     sk.sk.ops = &tcp_sk_ops;
     return &sk.sk;
@@ -74,8 +74,8 @@ fn tcpReleaseSock(sk:*net.Sock) void {
     const tsk:*TcpSock = toTcpSock(sk);
     if (tsk.state == .LISTEN) {
         _ = listen_map.remove(tsk.sk.src_addr.?);
-    } else {
-        _=conn_map.remove(.{.src = tsk.sk.src_addr.?, .dst = tsk.sk.dst_addr.?});
+    } else if (sk.src_addr != null and sk.dst_addr != null) {
+        _=conn_map.remove(.{.src = sk.src_addr.?, .dst = sk.dst_addr.?});
     }
     tsk.free();
 }
@@ -319,7 +319,6 @@ pub fn init() void {
     net.registerProtoFamily(net.Proto.SOCK_STREAM, &tcp_prot) catch unreachable;
     listen_map = ListenSockMap.init(alloc);
     conn_map = ConnSockMap.init(alloc);
-    net.registerProtoFamily(net.Proto.SOCK_STREAM, &tcp_prot) catch unreachable;
     
     //kthread.createKThread("test_tcp", &testTcp, null);
 }
@@ -343,7 +342,7 @@ fn testTcpEcho(a:?*anyopaque) u16 {
 }
 
 fn testTcp(_:?*anyopaque) u16 {
-    const sk = newTcpSock() catch unreachable; 
+    const sk = newTcpSock(0) catch unreachable; 
     const addr:net.SockAddr = .{
         .port = 80,
     };
@@ -466,7 +465,7 @@ fn recvSYN(pkt:*net.Packet, ap:*const net.SockAddrPair) !void {
     const len = @sizeOf(TcpHdr) + 4;
     const out = try ip.newPacket(len); // MSS option
     defer out.free();
-    const new_sk = toTcpSock(try newTcpSock());
+    const new_sk = toTcpSock(try newTcpSock(0));
     new_sk.sk.src_addr = ap.dst;
     new_sk.sk.dst_addr = ap.src;
     new_sk.seq = isn;

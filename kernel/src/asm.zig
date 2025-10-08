@@ -64,8 +64,10 @@ comptime {
     \\.endm
     \\
     \\.macro entry_call_return exit_func:req
+    \\ cli
     \\ mov %rsp, %rdi
     \\ call \exit_func
+    \\ sti
     \\ cli
     \\restore_regs 
     \\ add $16, %rsp

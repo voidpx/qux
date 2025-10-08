@@ -60,7 +60,7 @@ const udp_sk_ops:net.SockOps = .{
 const proto_udp:net.ProtoFamily = .{.new_sock = undefined};
 
 
-fn newUdpSk() !*net.Sock {
+fn newUdpSk(_:u32) !*net.Sock {
     const sk = try alloc.create(net.Sock);
     sk.* = .{};
     sk.ops = &udp_sk_ops;
@@ -173,6 +173,7 @@ fn udpReleaseSock(sk:*net.Sock) void {
 
 pub fn init() void {
     ip.registerTransProto(net.TransProto.UDP, &nr) catch unreachable; 
+    net.registerProtoFamily(net.Proto.SOCK_DGRAM, &proto_udp) catch unreachable;
     sock_map = SockMap.init(alloc);
 
     //@import("../kthread.zig").createKThread("test_udp", &testUdp, null);

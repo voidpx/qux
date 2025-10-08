@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <sys/prctl.h>
 #include <stdio.h>
 #include <sys/syscall.h>
@@ -475,7 +476,9 @@ void *start_server(void *arg) {
 	while (1) {
 		fd = accept(so, &sa, &sl);
 		if (fd == -1) {
-			perror("error accepting request");
+			if (errno != EAGAIN) {
+				perror("error accepting request");
+			}
 			continue;
 		}
 #define N 64

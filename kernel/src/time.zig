@@ -16,6 +16,12 @@ pub const Time = extern struct {
     sec: i64 align(1) = 0,
     nsec: i64 align(1) = 0,
 
+    pub fn new(ms:i64) Time {
+        const sec = @divTrunc(ms, msec_per_sec);
+        const msec = @rem(ms, msec_per_sec);
+        return .{.sec = sec, .nsec = msec * nsec_per_milli_sec};
+    }
+
     pub fn getAsNanoSeconds(t: *const @This()) i64 {
         return t.sec*nsec_per_sec + t.nsec;
     }
@@ -29,6 +35,12 @@ pub const Time = extern struct {
         return self;
     }
 };
+
+const ITimerVal = struct {
+    it_interval:Time,
+    it_value:Time,
+};
+
 pub const nsec_per_sec:u64 = 1000000000;
 pub const nsec_per_milli_sec:u64 = 1000000;
 pub const nsec_per_micro_sec:u64 = 1000;
@@ -127,6 +139,72 @@ pub fn init() void {
     syscall.registerSysCall(syscall.SysCallNo.sys_clock_nanosleep, &sysCloskNanoSleep);
     syscall.registerSysCall(syscall.SysCallNo.sys_clock_gettime, &sysClockGetTime);
     syscall.registerSysCall(syscall.SysCallNo.sys_time, &sysTime);
+    syscall.registerSysCall(syscall.SysCallNo.sys_setitimer, &sysSetITimer);
+    syscall.registerSysCall(syscall.SysCallNo.sys_getitimer, &sysGetITimer);
+}
+
+fn raiseAlm(tm:*Timer) void {
+    const l = lock.cli();
+    defer lock.sti(l);
+    const t:*task.Task = @alignCast(@ptrCast(tm.ctx));
+    if (t.signal.timer.?.repeat == 0) {
+        // single shot
+        removeTimer(&t.signal.timer.?);
+        t.signal.timer = null;
+    }
+    t.sendSignal(.alrm);
+}
+
+pub export fn sysSetITimer(which:i32, value:?*ITimerVal, old:?*ITimerVal) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const l = lock.cli();
+    defer lock.sti(l);
+    _=sysGetITimer(which, old);
+    const t = task.getCurrentTask();
+    if (value) |v| {
+        const exp = v.it_value.getAsMilliSeconds();
+        const int = v.it_interval.getAsMilliSeconds();
+        if (exp == 0 and int == 0) {
+            if (t.signal.timer != null) {
+                removeTimer(&t.signal.timer.?);
+                t.signal.timer = null;
+            }
+        } else {
+            if (t.signal.timer != null) {
+                removeTimer(&t.signal.timer.?);
+            }
+            const now = getTime();
+            const nf = now.getAsMilliSeconds() + exp;
+            t.signal.timer = .{
+                .ctx = t,
+                .repeat = int,
+                .next_fire = nf,
+                .func = &raiseAlm,
+            };
+            addTimer(&t.signal.timer.?);
+        }
+    }
+    return 0;
+}
+
+pub export fn sysGetITimer(which:i32, old:?*ITimerVal) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const l = lock.cli();
+    defer lock.sti(l);
+    const t = task.getCurrentTask();
+    if (old) |o| {
+        if (t.signal.timer) |tm| {
+            const now = getTime().getAsMilliSeconds();
+            o.it_value = Time.new(0);
+            o.it_interval = Time.new(0);
+            if (tm.next_fire > now) {
+                o.it_value = Time.new(tm.next_fire - now);
+            }
+            if (tm.repeat > 0) {
+                o.it_interval = Time.new(tm.repeat);
+            }
+        }
+    }
+    _=&which;
+    return 0;
 }
 
 pub export fn sysTime(tp:?*i64) callconv(std.builtin.CallingConvention.SysV) i64 {

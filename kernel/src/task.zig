@@ -363,6 +363,10 @@ pub const Task = struct {
     clear_child_tid:?*u32 = null,
     robust_list:?*RobustListHead = null,
 
+    pub fn isThread(t:*@This()) bool {
+        return t.id != t.pid;
+    }
+
     pub fn registerExitListener(t:*@This(), l:*TaskListener) void {
         const f = lock.cli();
         defer lock.sti(f);
@@ -433,11 +437,12 @@ pub const Task = struct {
             t.state = .blocked;
             t.on_wq = .{.q = &this.exit_wq, .n = &node};
             scheduleWithIF();
-            // XXX: remove t from the wait queue if it wasn't woken up by child exit ??
-            //wqRemove(&this.exit_wq, &node);
+            if (t.signal.signalPending()) {
+                return -syscall.EINTR;
+            }
         }
         const exit_code = this.exit_code;
-        // let the waiter handle the chld signal even the waitee is dead
+        this.parent.?.children.remove(&this.child_link);
         task_list.remove(&this.list);
         this.die();
         return exit_code;
@@ -505,27 +510,63 @@ pub fn init() void {
 
 }
 
-pub export fn sysWait4(pid:i32, status:?*i32, option:i32, ru:?*anyopaque) callconv(std.builtin.CallingConvention.SysV) i64 {
+fn getFirstChild(t:*Task, state:?TaskState) ?*Task {
+    var node = t.children.first;
+    while (node) |n| {
+        const nt = n.data;
+        if (!nt.isThread() and (state == null or state.? == nt.state)) {
+            return nt;
+        }
+        node = n.next;
+    }
+    return null;
+}
+
+// XXX: not working well
+fn waitpid(pid:i32, status:?*i32, option:i32) i64 {
     const l = lock.cli();
     defer lock.sti(l);
     var t:*Task = undefined;
+    const p = getCurrentTask();
     if (pid == -1) {
-        const p = getCurrentTask();
-        if (p.children.len > 0) {
-            t = @ptrCast(p.children.first.?.data);
-        } else {
-            return -1;
-        }
-    } else {
+        if (getFirstChild(p, .dead)) |c| {
+            t = c;
+        } else if (getFirstChild(p, null)) |c| {
+            t = c;
+        } else return -1;
+    } else if (pid < -1) {
+        t = getTask(@intCast(-pid)) orelse return -1;
+    } else if (pid > 1) {
         t = getTask(@intCast(pid)) orelse return -1;
+    } else return -1;
+
+    if (t.state != .dead and (option & WNOHANG) > 0) return 0;
+
+    var ret = t.id;
+    var code = t.wait();
+    
+    // t must not be used anymore if it was reaped
+    if (code == -syscall.EINTR and p.signal.signalOn(.chld) and pid == -1) {
+        if (getFirstChild(p, .dead)) |c| {
+            t = c;
+            ret = t.id;
+            code = c.wait();
+        }
     }
-    _=&option;
-    _=&ru;
-    const code = t.wait();
+    if (code < 0) {
+        return code;
+    }
     if (status) |s| {
         s.* = code;
     }
-    return t.id;
+    return ret;
+
+}
+const	WNOHANG:i32		= 1;
+const	WUNTRACED:i32	= 2;
+pub export fn sysWait4(pid:i32, status:?*i32, option:i32, ru:?*anyopaque) callconv(std.builtin.CallingConvention.SysV) i64 {
+    _=&ru;
+    return waitpid(pid, status, option);
 }
 
 pub export fn sysGetCwd(buf:[*]u8, size:usize) callconv(std.builtin.CallingConvention.SysV) i64 {
@@ -842,10 +883,11 @@ fn schedRoutine(_:?*anyopaque) u16 {
         var it = runq.iterator(); 
         if (min >= 0) {
             while (it.next()) |t| {
-                t.sched.share -= min;
+                t.sched.share -= @min(min, t.sched.share);
             }
             // cur is not in runq
-            getCurrentTask().sched.share -= min;
+            const t = getCurrentTask();
+            t.sched.share -= @min(min, t.sched.share);
         }
     }
 }
@@ -965,9 +1007,9 @@ pub export fn sysExit(code: u16) callconv(std.builtin.CallingConvention.SysV) vo
 }
 
 fn exitTask(t:*Task, code:u16) void {
+    //console.print("======exit: tid: {}, pid: {}\n", .{t.id, t.pid});
     if (t.state == .dead) return;
-    const is_thread = t.id != t.pid;
-    if (!is_thread) { // the process
+    if (!t.isThread()) { // the process
         //console.print("process exit: {}\n", .{t.id});
         var n = t.threads.first;
         while (n) |nt| {
@@ -984,8 +1026,8 @@ fn exitTask(t:*Task, code:u16) void {
         l.func(l.ctx, t);
     }
     if (t.parent) |p| {
-        p.children.remove(&t.child_link);
-        if (!is_thread) { // not a thread
+        //p.children.remove(&t.child_link);
+        if (!t.isThread()) { // not a thread
             p.sendSignal(.chld); //TODO: handle this
         }
     }
@@ -995,11 +1037,14 @@ fn exitTask(t:*Task, code:u16) void {
             _=lock.futexWake(t, c);
         }
     }
+    if (t.signal.timer) |_| {
+        time.removeTimer(&t.signal.timer.?);
+    }
     wakeup(&t.exit_wq);
-    if (is_thread) {
+    if (t.isThread()) {
         task_list.remove(&t.list);
         auto_reap_list.append(&t.list);
-        t.parent.?.threads.remove(&t.child_link);
+        t.parent.?.threads.remove(&t.thread_link);
         wakeup(&auto_reap_wq);
     }
 }
@@ -1172,12 +1217,12 @@ fn setupTask(a:*const CloneArgs, task:*Task, cur:*Task) !void {
         if (a.tls != 0) {
             task.fsbase = a.tls;
         }
+        frame.state.rflags = 0x202;
     }
     task.list = .{.prev = null, .next = null, .data = task};
     task_list.append(&task.list);
     task.sp = fp;
-    //task.child_link.data = task;
-    cur.children.append(&task.child_link);
+    if (!cur.isThread()) cur.children.append(&task.child_link);
     task.sched.share = if (runq.peek()) |t| t.sched.share else 0; 
 }
 
