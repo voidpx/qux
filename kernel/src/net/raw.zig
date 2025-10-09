@@ -115,23 +115,22 @@ fn send(sk:*net.Sock, buf:[]const u8) anyerror!usize{
     return try send_to(sk, buf, &sk.dst_addr.?);
 }
 fn recv_from(sk:*net.Sock, buf:[]u8, addr:?*net.SockAddr) anyerror![]u8{
-    _=&addr;
-    return recv(sk, buf);
-}
-fn recv(sk:*net.Sock, buf:[]u8) anyerror![]u8{
-    _=&sk;
-    _=&buf;
     const l = lock.cli();
     defer lock.sti(l);
     while (true) {
         const p = sk.rq.peek() orelse {
             const t = task.getCurrentTask();
-            task.wait(&sk.rwq);
             if (t.signal.signalPending()) {
                 return error.InterruptedError;
             }
+            task.wait(&sk.rwq);
             continue;
         };
+        if (addr) |a| {
+            const iph = p.getIpV4Hdr();
+            a.addr = iph.src_addr;
+        }
+        
         const tdata = p.getTransPacket();
         const len = @min(buf.len, tdata.len);
         @memcpy(buf[0..len], tdata[0..len]);
@@ -141,6 +140,11 @@ fn recv(sk:*net.Sock, buf:[]u8) anyerror![]u8{
     }
     return &.{};
 }
+
+fn recv(sk:*net.Sock, buf:[]u8) anyerror![]u8{
+    return try recv_from(sk, buf, null);
+}
+
 fn release(sk:*net.Sock) void {
     _=&sk;
     const rp = rawPriv(sk);
