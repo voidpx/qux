@@ -31,8 +31,11 @@ pub const Time = extern struct {
     }
 
     pub fn add(self:*@This(), t:Time) *@This() {
-        addTime(self, t);
-        return self;
+        return addTime(self, t);
+    }
+
+    pub fn addMillis(self:*@This(), t:i64) *@This() {
+        return addMilliSeconds(self, t);
     }
 };
 
@@ -49,27 +52,28 @@ pub const nsec_per_tick = nsec_per_sec / pit.tick_hz;
 
 var time: Time = .{};
 
-pub fn setTime(t: Time) void {
+fn setTime(t: Time) void {
     time = t;
 }
 
-pub fn addSeconds(sec: i64) void {
-    time.sec += sec;
+pub fn addSeconds(t:*Time, sec: i64) *Time {
+    return addTime(t, .{.sec = sec});
 }
 
-pub fn addNanoSeconds(nsec: i64) void {
-    addTime(&time, .{.nsec = nsec});
+pub fn addNanoSeconds(t:*Time, nsec: i64) *Time {
+    return addTime(t, .{.nsec = nsec});
 }
 
-pub fn addTime(t: *Time, delta: Time) void {
+pub fn addTime(t: *Time, delta: Time) *Time {
     t.sec += delta.sec;
     const nano = t.nsec + delta.nsec;
     t.sec += @divTrunc(nano, nsec_per_sec);
     t.nsec = @rem(nano, nsec_per_sec);
+    return t;
 }
 
-pub fn addMilliSeconds(msec : i64) void {
-    addNanoSeconds(msec * nsec_per_milli_sec);
+pub fn addMilliSeconds(t:*Time, msec : i64) *Time {
+    return addNanoSeconds(t, msec * nsec_per_milli_sec);
 }
 
 fn wakeUp(t:*Timer) void {
@@ -83,6 +87,27 @@ fn onExit(ctx:?*anyopaque, _:*task.Task) void {
 }
 
 const console = @import("console.zig");
+
+pub fn waitTimeout(wq:*task.WaitQueue, to:i64) i64 {
+    if (to == 0) return 0;
+    const v = lock.cli();
+    defer lock.sti(v);
+    var now = getTime();
+    var fire_at:i64 = undefined;
+    if (to < 0) {
+        fire_at = std.math.maxInt(@TypeOf(to));
+    } else {
+        fire_at = addMilliSeconds(&now, @intCast(to)).getAsMilliSeconds();
+    }
+    var timer = Timer{.ctx = wq, .func = &wakeUp, .repeat = 0, .next_fire = fire_at};
+    addTimer(&timer);
+    task.wait(wq);
+    removeTimer(&timer); // in case it wasn't waked up by the timer
+    now = getTime();
+    const ms = fire_at - now.getAsMilliSeconds();
+    return if (ms <= 0) 0 else ms;
+}
+
 pub fn sleep(t: *const Time, rem:?*Time) i32 {
     const ct = t.*;
     if (rem) |r| r.* = .{};
@@ -90,10 +115,9 @@ pub fn sleep(t: *const Time, rem:?*Time) i32 {
     var dup = now;
     const expire = dup.add(ct);
     if (expire.getAsMilliSeconds() <= now.getAsMilliSeconds()) return 0;
-    var cur = task.getCurrentTask();
     const v = lock.cli();
     defer lock.sti(v);
-    if (cur.state == .dead) task.schedule();
+    var cur = task.getCurrentTask();
     cur.state = .sleep;
     var wq = task.WaitQueue{};
     var node:task.WaitQueue.Node = .{.data = cur};
@@ -112,7 +136,6 @@ pub fn sleep(t: *const Time, rem:?*Time) i32 {
         const ms = expire.getAsMilliSeconds() - now.getAsMilliSeconds();
         r.sec = @divFloor(ms, 1000);
         r.nsec = @mod(ms, 1000);
-        return -1;
     }
     return -1;
 }
@@ -120,8 +143,7 @@ pub fn sleep(t: *const Time, rem:?*Time) i32 {
 pub fn getTime() Time {
     var t = time;
     const boot_time = getBootTime();
-    addTime(&t, .{.nsec = @as(i64, @intCast(boot_time))});
-    return t;
+    return addTime(&t, .{.nsec = @as(i64, @intCast(boot_time))}).*;
 }
 const rtc = @import("rtc.zig");
 const pit = @import("pit.zig");
@@ -132,7 +154,7 @@ pub fn init() void {
     const rt = rtc.readRTC();
     var now = makeTime(rt);
     const boot_time = getBootTime();
-    addTime(&now, .{.nsec = -@as(i64, @intCast(boot_time))});
+    _ = addTime(&now, .{.nsec = -@as(i64, @intCast(boot_time))});
     time = now;
     con.timeReady(&getBootTime);
     syscall.registerSysCall(syscall.SysCallNo.sys_nanosleep, &sysNanoSleep);

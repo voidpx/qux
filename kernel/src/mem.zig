@@ -19,6 +19,12 @@ const std = @import("std");
 const bi = @import("bootinfo.zig");
 var heap: u64 = undefined;
 var used_pages: u64 = undefined;
+
+pub fn checkUserAddr(ua:?*const anyopaque) !void {
+    const a = ua orelse return error.NullPointerError;
+    if (@intFromPtr(a) >= user_max) return error.InvalidUserPointer;
+}
+
 /// only needed during init for the page bitmap
 const InitAllocator = struct {
     const vt = std.mem.Allocator.VTable{ .alloc = &@This().alloc, .resize = &@This().resize, .remap = &@This().remap,

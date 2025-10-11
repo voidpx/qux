@@ -315,7 +315,33 @@ fn dummyFreePath(_:*fs.MountedFs, _:fs.Path) void {}
 const console_fops:fs.FileOps = .{.read = &consoleFileRead,
     .write = &consoleFileWrite,
     .ioctl = &consoleIoCtl,    
+    .poll = &consolePoll,
 };
+
+var console_pwl: fs.PollWaitList = .{};
+fn consolePoll(_:*fs.File, pw:fs.PollWait) anyerror!fs.PollResult {
+    if (pw.events == 0) return error.NoEventsToPoll;
+    var r:u16 = 0;
+    if ((pw.events & fs.PollIn) > 0 and !input_buf.isEmpty()) {
+        r |= fs.PollIn;
+    }
+    if ((pw.events & fs.PollOut) > 0) {
+        r |= fs.PollOut;
+    }
+    if (r == 0) { // added only if no event yet, sync with release!!
+        console_pwl.events = pw.events;
+        console_pwl.wq_list.append(pw.wqn);
+    }
+    return fs.PollResult{.wait = pw, .events = r, .priv = null, .release = &releasePollResult};
+}
+fn releasePollResult(pr:fs.PollResult) void {
+    if (pr.events > 0) return; // wait queue was only added if events == 0
+    const l = lock.cli();
+    defer lock.sti(l);
+    if (pr.wait.wqn.prev == null and pr.wait.wqn.next == null) return;
+    console_pwl.wq_list.remove(pr.wait.wqn);
+}
+
 const console_fsop:fs.FsOp = .{.stat = &dummyStat, .lookup = undefined, .lookupAt = undefined, .copy_path = undefined, .free_path = &dummyFreePath};
 const console_fs:fs.MountedFs = .{.ops = &console_fsop, .ctx = null, .root = undefined, .fops = &console_fops};
 

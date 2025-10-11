@@ -5,6 +5,7 @@ const ip = @import("ip.zig");
 const net = @import("net.zig");
 const console = @import("../console.zig");
 const alloc = @import("../mem.zig").allocator;
+const fs = @import("../fs.zig");
 
 const isn:u32 = 0;
 const tcp_prot = net.ProtoFamily{.new_sock = &newTcpSock};
@@ -16,9 +17,10 @@ var conn_map:ConnSockMap = undefined;
 
 fn tcpListen(sk:*net.Sock) !void {
     const la = sk.src_addr orelse return error.TcpSockNotBound;
-    toTcpSock(sk).state = .LISTEN;
-    listen_map.put(la, toTcpSock(sk)) catch |e| {
-        toTcpSock(sk).state = .CLOSED;
+    const tsk = toTcpSock(sk);
+    tsk.state = .LISTEN;
+    listen_map.put(la, tsk) catch |e| {
+        tsk.state = .CLOSED;
         return e;
     };
 }
@@ -89,11 +91,18 @@ const tcp_sk_ops:net.SockOps = .{
     .send_to = &tcpSendTo,
     .recv = &tcpReceive,
     .recv_from = &tcpReceiveFrom,
-    .release = &tcpReleaseSock
+    .release = &tcpReleaseSock,
+    .poll = tcpPoll,
 };
 
 inline fn checkConnected(sk:*TcpSock) !void {
     if (sk.state != .ESTABLISHED) return error.TcpNotConnected;
+}
+
+fn tcpPoll(sk:*net.Sock, pw:fs.PollWait) !fs.PollResult {
+    const tsk = toTcpSock(sk);
+    if (tsk.state != .LISTEN and tsk.state != .ESTABLISHED) return error.InvalidTcpState;
+    return try net.sockPoll(sk, pw);
 }
 
 fn tcpSendTo(sk:*net.Sock, buf:[]const u8, _:?*const net.SockAddr) anyerror!usize {
@@ -142,6 +151,7 @@ fn tcpReceive(sk:*net.Sock, buf:[]u8) anyerror![]u8 {
     while (true) {
         try checkConnected(tsk);
         const p = sk.rq.peek() orelse {
+            if (task.getCurrentTask().signal.signalPending()) return error.InterruptedError;
             task.wait(&sk.rwq);
             continue;
         };
@@ -406,7 +416,7 @@ fn sendRST(laddr:*const net.SockAddr, raddr:*const net.SockAddr, th:*TcpHdr) !vo
     sendPrepare0(laddr, raddr, out);
     out_th.setSeq(if (th.isACK()) th.getAck() else isn);
     out_th.setAck(th.getSeq() + 1);
-    //out_th.setACK(true);
+    out_th.setACK(true);
     out_th.setRST(true);
     out_th.setHdrLen(@sizeOf(TcpHdr));
     try ip.ipSend(out, &calcTcpSum);
@@ -520,7 +530,6 @@ fn recvFIN(tsk:?*TcpSock, pkt:*net.Packet) !void {
     } else {
         console.log("FIN received in wrong state: {}\n", .{sk.state});
     }
-    
 }
 
 fn handleRecv(ap:*const net.SockAddrPair, pkt:*net.Packet, th:*TcpHdr) !void {
@@ -534,8 +543,7 @@ fn handleRecv(ap:*const net.SockAddrPair, pkt:*net.Packet, th:*TcpHdr) !void {
                 try sendSYNACK(ts, ap);
             } else {
                 _=conn_map.remove(.{.src = ap.dst, .dst = ap.src});
-                task.wakeup(&ts.sk.rwq);
-                task.wakeup(&ts.sk.wwq);
+                net.notifyWaiters(&ts.sk, fs.PollIn | fs.PollOut);
                 task.schedule();
                 try handleRecv(ap, pkt, th);
             }
@@ -544,8 +552,7 @@ fn handleRecv(ap:*const net.SockAddrPair, pkt:*net.Packet, th:*TcpHdr) !void {
         } else if (th.isRST()) {
             console.log("RST received from peer\n", .{});
             _=conn_map.remove(.{.src = ap.dst, .dst = ap.src});
-            task.wakeup(&ts.sk.rwq);
-            task.wakeup(&ts.sk.wwq);
+            net.notifyWaiters(&ts.sk, fs.PollIn | fs.PollOut);
         } else {
             // connected or half open
             blk: switch (ts.state) {
@@ -555,7 +562,7 @@ fn handleRecv(ap:*const net.SockAddrPair, pkt:*net.Packet, th:*TcpHdr) !void {
                         ts.state = .ESTABLISHED;
                         const lsk = listen_map.get(ts.sk.src_addr.?).?;
                         try lsk.conns.append(ts);
-                        task.wakeup(&lsk.sk.rwq);
+                        net.notifyWaiters(&lsk.sk, fs.PollIn);
                     } else {
                         console.log("SYN_RCVD state, but not an ACK: {any}, sk_seq:0x{x}, th_seq:0x{x}\n", .{th.*, ts.seq, th.getAck()});
                     }
@@ -576,7 +583,7 @@ fn handleRecv(ap:*const net.SockAddrPair, pkt:*net.Packet, th:*TcpHdr) !void {
                     ts.ack = ack;
                     try sendACK(ts, pkt, false); 
                     ts.sk.rq.enqueue(pkt);
-                    task.wakeup(&ts.sk.rwq);
+                    net.notifyWaiters(&ts.sk, fs.PollIn);
                     return; // return here so packet is not freed as it's pushed to upper layer
                 },
                 .LAST_ACK => {
@@ -585,8 +592,7 @@ fn handleRecv(ap:*const net.SockAddrPair, pkt:*net.Packet, th:*TcpHdr) !void {
                         //console.log("FIN ACKED\n", .{});
                     }
                     _=conn_map.remove(.{.src = ap.dst, .dst = ap.src});
-                    task.wakeup(&ts.sk.rwq);
-                    task.wakeup(&ts.sk.wwq);
+                    net.notifyWaiters(&ts.sk, fs.PollIn | fs.PollOut);
                 },
                 else => {
                     console.log("tcp packet not handled\n", .{});

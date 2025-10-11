@@ -1,4 +1,5 @@
-const alloc = @import("../mem.zig").allocator;
+const mem = @import("../mem.zig");
+const alloc = mem.allocator;
 const task = @import("../task.zig");
 const std = @import("std");
 const syscall = @import("../syscall.zig");
@@ -9,10 +10,12 @@ var sock_map:SockMap = undefined;
 
 pub const Sock = struct {
     priv:?*anyopaque = null,
+    opts:u64 = 0,
     rq:PacketQueue = .{},
     wq:PacketQueue = .{},
     rwq:task.WaitQueue = .{},
     wwq:task.WaitQueue = .{},
+    pwl:fs.PollWaitList = .{},
     src_addr:?SockAddr = null,
     dst_addr:?SockAddr = null,
     ops:*const SockOps = undefined,
@@ -99,6 +102,7 @@ pub const SockOps = struct {
     recv_from:*const fn(sk:*Sock, buf:[]u8, addr:?*SockAddr) anyerror![]u8,
     recv:*const fn(sk:*Sock, buf:[]u8) anyerror![]u8,
     release:*const fn(sk:*Sock) void,
+    poll:*const fn(sk:*Sock, pw:fs.PollWait) anyerror!fs.PollResult,
 };
 
 pub const TransProto = enum (u8) {
@@ -367,10 +371,58 @@ pub fn init() void {
     syscall.registerSysCall(syscall.SysCallNo.sys_recvfrom, &sysRecvFrom);
     syscall.registerSysCall(syscall.SysCallNo.sys_sendto, &sysSendTo);
     syscall.registerSysCall(syscall.SysCallNo.sys_setsockopt, &sysSetSockOpt);
+    syscall.registerSysCall(syscall.SysCallNo.sys_getsockname, &sysGetSockName);
 
 }
 
-const sk_fops:fs.FileOps = .{.read = &read, .write = &write, .finalize = &finalize};
+pub fn sockPoll(sk:*Sock, pw:fs.PollWait) anyerror!fs.PollResult {
+    if (pw.events == 0) return error.NoEventsToPoll;
+    const l = lock.cli();
+    defer lock.sti(l);
+    var r:u16 = 0;
+    if ((pw.events & fs.PollIn) > 0 and sk.rq.getCount() > 0) {
+        r |= fs.PollIn; 
+    }
+    if ((pw.events & fs.PollOut) > 0) {
+        r |= fs.PollOut;
+    }
+    if (r == 0) { // added only if no event yet, sync with release!!
+        sk.pwl.events = pw.events;
+        sk.pwl.wq_list.append(pw.wqn);
+    }
+    return fs.PollResult{.wait = pw, .events = r, .priv = sk, .release = &releasePollResult};
+}
+
+fn releasePollResult(pr:fs.PollResult) void {
+    if (pr.events > 0) return; // wait queue was only added if events == 0
+    const l = lock.cli();
+    defer lock.sti(l);
+    const sk:*Sock = @alignCast(@ptrCast(pr.priv.?)); 
+    if (pr.wait.wqn.prev == null and pr.wait.wqn.next == null) return;
+    sk.pwl.wq_list.remove(pr.wait.wqn);
+}
+
+const sk_fops:fs.FileOps = .{.read = &read, 
+    .write = &write, 
+    .poll = &poll,
+    .finalize = &finalize};
+
+fn poll(file:*fs.File, pw:fs.PollWait) !fs.PollResult {
+    const sk:*Sock = @alignCast(@ptrCast(file.ctx.?));
+    return try sk.ops.poll(sk, pw);
+}
+
+pub fn notifyWaiters(sk:*Sock, events:u16) void {
+    if (events & fs.PollIn > 0) {
+        task.wakeup(&sk.rwq);
+    }
+    if (events & fs.PollOut > 0) {
+        task.wakeup(&sk.wwq);
+    }
+    if (events & sk.pwl.events > 0) {
+        task.wakeupList(&sk.pwl.wq_list);
+    }
+}
 
 fn read(file:*fs.File, buf:[]u8) anyerror![]u8 {
     const sk:*Sock = @alignCast(@ptrCast(file.ctx.?));
@@ -411,6 +463,21 @@ pub export fn sysSocket(family:u32, ptype:u32, proto:u32) callconv(std.builtin.C
     file.ctx = sk;
     t.fs.installFd(fd, file);
     return @intCast(fd);
+}
+
+pub export fn sysGetSockName(fd:u32, addr:?*SockAddr, _:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    mem.checkUserAddr(addr) catch return -1;
+    const a = addr.?;
+    const t = task.getCurrentTask();
+    const f = t.fs.getFile(fd) orelse return -1;
+    const sk:*Sock = @alignCast(@ptrCast(f.ctx.?));
+    const sa = sk.src_addr orelse return -1;
+    a.* = .{
+        .family = 2, // ipv4 only
+        .addr = @byteSwap(sa.addr),
+        .port = @byteSwap(sa.port),
+    };
+    return 0;
 }
 
 pub export fn sysBind(fd:u32, addr:*const SockAddr, _:u32) callconv(std.builtin.CallingConvention.SysV) i64 {

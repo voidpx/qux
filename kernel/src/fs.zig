@@ -4,6 +4,7 @@ const std = @import("std");
 const Count = std.atomic.Value(u64);
 const mem = @import("mem.zig");
 const list = @import("lib/list.zig");
+const time = @import("time.zig");
 pub const FileList = list.List(*File);
 //const Path = list.List(*DirEntry);
 const object = @import("object.zig");
@@ -29,6 +30,7 @@ pub const File = struct {
     path:Path,
     size:u64 = 0,
     ops:*const FileOps,
+    pwq_list:task.WaitQueueList = .{},
     fn dtor(f:*File) void {
         if (f.ops.finalize) |fi| {
             fi(f) catch {};
@@ -161,6 +163,8 @@ pub const FileOps = struct {
     finalize:?*const fn(file:*File) anyerror!void = null,
     ioctl:?*const fn(file:*File, cmd:u32, arg:u64) i64 = null,
     readdir:?*const fn(file:*File, d:*DEntry, len:u64) anyerror!i64 = null,
+    poll:?*const fn(file:*File, pw:PollWait) anyerror!PollResult = null,
+    truncate:?*const fn(file:*File) anyerror!void = null,
 };
 
 pub const MountedFs = struct {
@@ -201,6 +205,85 @@ pub const Stat = extern struct {
     }
 };
 
+pub const PollIn:u16 = 0x1;
+pub const PollOut:u16 = 0x4;
+pub const PollFd = extern struct {
+    fd:i32 align(1),
+    events:u16 align(1),
+    revents:u16 align(1),
+};
+
+pub const PollWait = struct {
+    events:u16 = 0,
+    wqn:*task.WaitQueueList.Node,
+};
+
+pub const PollWaitList = struct {
+    events:u16 = 0,
+    wq_list:task.WaitQueueList = .{},
+};
+
+pub const PollResult = struct {
+    events:u16 = 0,
+    priv:?*anyopaque = null,
+    wait:PollWait,
+    release:*const fn(pr:@This()) void,
+};
+
+const PrList = std.ArrayList(PollResult);
+fn releasePrs(rl:*PrList) void {
+    for (rl.items) |pr| {
+        pr.release(pr);
+    }
+    rl.clearRetainingCapacity();
+}
+pub export fn sysPoll(fds:?[*]PollFd, nfds:u32, timeout:i32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    mem.checkUserAddr(fds) catch return -1;
+    // XXX: problematic!!
+    const f = fds.?;
+    var prs:PrList = PrList.init(alloc);
+    defer {
+        releasePrs(&prs);
+        prs.deinit();
+    }
+    var rn:i32 = 0;
+    var wq = task.WaitQueue{};
+    var node = task.WaitQueueList.Node{.data = &wq};
+    rn = doOnePoll(&node, f, nfds, &prs);
+    if (rn != 0) return rn;
+    const to = time.waitTimeout(&wq, timeout);
+    // do another
+    releasePrs(&prs);
+    rn = doOnePoll(&node, f, nfds, &prs);
+    if (rn != 0) return rn;
+    if (to == 0) return 0;
+    return -1;
+}
+
+fn doOnePoll(wqn:*task.WaitQueueList.Node, f:[*]PollFd, nfds:u32, rl:*PrList) i32 {
+    const t = task.getCurrentTask();
+    var rn:i32 = 0;
+    for (0..nfds) |i| {
+        if (f[i].events == 0) continue;
+        const fd = f[i].fd;
+        if (fd < 0) continue;
+        const file = t.fs.getFile(@intCast(fd)) orelse return -1;
+        const p = file.ops.poll orelse {
+            f[i].revents = f[i].events;
+            continue;
+        };
+        const pr = p(file, .{.events = f[i].events, .wqn = wqn}) catch {
+            return -1;
+        };
+        rl.append(pr) catch return -1;
+        if (pr.events > 0) {
+            rn += 1;
+            f[i].revents = pr.events;
+        }
+    }
+    return rn;
+}
+
 pub var mounted_fs:*MountedFs = undefined;
 
 pub fn init() void {
@@ -229,6 +312,8 @@ pub fn init() void {
     syscall.registerSysCall(syscall.SysCallNo.sys_newfstat, &sysFStat);
     syscall.registerSysCall(syscall.SysCallNo.sys_newlstat, &sysLStat);
     syscall.registerSysCall(syscall.SysCallNo.sys_getdents64, &sysGetDents64);
+    syscall.registerSysCall(syscall.SysCallNo.sys_poll, &sysPoll);
+
 }
 
 const console = @import("console.zig");
@@ -433,8 +518,7 @@ pub export fn sysIoCtl(fd:u32, cmd:u32, arg:u64) callconv(std.builtin.CallingCon
     const l = lock.cli();
     defer lock.sti(l);
     const t = task.getCurrentTask();
-    if (fd >= t.fs.open_files.items.len) return -1;
-    const f = t.fs.open_files.items[fd] orelse return -1;
+    const f = t.fs.getFile(fd) orelse return -1;
     const op = f.ops.ioctl orelse return -1;
     return op(f, cmd, arg);
 }
@@ -557,6 +641,13 @@ pub fn openAt(dfd:i32, path: [*:0]const u8, flags:u32) !*File {
     }
     return file;
 }
+
+const O_RDONLY:u32	= 0o00000000;
+const O_WRONLY:u32	= 0o00000001;
+const O_RDWR  :u32  = 0o00000002;
+const O_CREAT :u32  = 0o00000100;
+const O_TRUNC :u32  = 0o00001000;
+const O_APPEND:u32	= 0o00002000;
 pub fn open(path: [*:0]const u8, flags:u32, mode:u16) !*File {
     const len = std.mem.len(path);
     const f = try mounted_fs.ops.lookup(mounted_fs, path[0..len], flags, mode);
@@ -567,6 +658,12 @@ pub fn open(path: [*:0]const u8, flags:u32, mode:u16) !*File {
     var st:Stat = undefined;
     if (sysStat(path, &st) == 0) {
         file.size = st.st_size;
+    }
+    if (file.size > 0 and (flags & 3) > 0 and
+        ((flags & O_TRUNC) > 0 or (flags & O_APPEND) == 0)) {
+        if (file.ops.truncate) |tr| {
+            try tr(file);
+        }
     }
     return file;
 }

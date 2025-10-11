@@ -6,6 +6,8 @@ const sig = @import("signal.zig");
 const TaskList = std.DoublyLinkedList(*Task);
 pub const WaitQueue = std.DoublyLinkedList(*Task);
 
+pub const WaitQueueList = std.DoublyLinkedList(*WaitQueue);
+
 fn wqPop(wq:*WaitQueue) ?*WaitQueue.Node {
     var n = wq.popFirst() orelse return null;
     n.prev = null;
@@ -1102,6 +1104,16 @@ pub fn wait(wq: *WaitQueue) void {
     t.on_wq = .{.q = wq, .n = &node};
     wq.append(&node);
     scheduleWithIF();
+}
+
+pub fn wakeupList(wql:*WaitQueueList) void {
+    const v = lock.cli();
+    defer lock.sti(v);
+    while (wql.popFirst()) |n| {
+        n.prev = null;
+        n.next = null;
+        wakeup(n.data);
+    }
 }
 
 pub fn wakeup(wq:*WaitQueue) void {

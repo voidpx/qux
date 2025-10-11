@@ -1,3 +1,4 @@
+const fs = @import("../fs.zig");
 const task = @import("../task.zig");
 const lock = @import("../lock.zig");
 const alloc = @import("../mem.zig").allocator;
@@ -55,6 +56,7 @@ const udp_sk_ops:net.SockOps = .{
     .connect = &udpConnect,
     .accept = &udpAccept,
     .release = &udpReleaseSock,
+    .poll = &net.sockPoll,
 };
 
 const proto_udp:net.ProtoFamily = .{.new_sock = undefined};
@@ -219,6 +221,6 @@ fn udpRecv(_:*net.NetReceiver, pkt:*net.Packet) !void {
         return;
     };
     sk.rq.enqueue(pkt);
-    task.wakeup(&sk.rwq);
+    net.notifyWaiters(sk, fs.PollIn);
 }
 

@@ -45,7 +45,26 @@ const ext2fs_fops = fs.FileOps {
     .read = &read,
     .write = &write,
     .readdir = &readdir,
+    .truncate = &truncate,
 };
+
+fn truncate(file:*fs.File) !void {
+    const dent:*DirEntObj = @alignCast(@ptrCast(file.path.entry.priv));
+    var inode = try readINode(dent.dentry.inode);
+    if (inode.size > 0) {
+        const sblk = 0;
+        const eblk = (inode.size + block_size - 1) / block_size;
+        const bkn = try allocator.alloc(u32, eblk - sblk);
+        defer allocator.free(bkn);
+        try getBlockNumRange(&inode, sblk, eblk, bkn);
+        try freeBlocks(bkn);
+        try freeINodeIndexBlocks(&inode);
+    }
+    inode.blocks = 0;
+    inode.size = 0;
+    inode.ctime = @intCast(time.getTime().sec);
+    try writeINode(dent.dentry.inode, &inode);
+}
 
 fn unlink(mfs:*fs.MountedFs, dir:fs.Path, name:[]const u8) !void {
     const e = try lookupAt(mfs, dir, name, 0, 0);
@@ -493,6 +512,7 @@ fn write(file:*fs.File, buf:[]const u8) anyerror!usize {
     inode.ctime = @intCast(now);
     
     try writeINode(dp.dentry.inode, &inode);
+    file.pos += buf.len;
     return buf.len;
 }
 
@@ -940,6 +960,61 @@ fn allocINode(start_gi:u32) !INodeAlloc {
     return error.OutOfSpace;
 }
 
+fn freeINodeIndexBlocks(inode:*INode) !void {
+    var bcache = bc.BCache.new(bdev, block_size); 
+    defer bcache.drop();
+    const num:usize = block_size/@sizeOf(u32);
+    for (0..inode.block.len) |i| {
+        if (inode.block[i] == 0) break;
+        switch (i) {
+            0...11 => {
+                // direct block 
+            },
+            12 => {
+                try freeBlocks(&.{inode.block[i]});
+            },
+            13 => {
+                const ia:[*] align(1) u32 = @ptrCast((try bcache.getBlock(inode.block[i])).ptr);
+                var last:usize = num;
+                for (0..num) |b| {
+                    if (ia[b] == 0) {
+                        last = b;
+                        break;
+                    }
+                }
+                try freeBlocks(ia[0..last]);
+                try freeBlocks(&.{inode.block[i]});
+            },
+            14 => {
+                const ia:[*] align(1) u32 = @ptrCast((try bcache.getBlock(inode.block[i])).ptr);
+                var last:usize = num;
+                for (0..num) |b| {
+                    if (ia[b] == 0) {
+                        last = b;
+                        break;
+                    }
+                    const ian:[*] align(1) u32 = @ptrCast((try bcache.getBlock(ia[b])).ptr);
+                    var lastn:usize = num;
+                    for (0..num) |bn| {
+                        if (ian[bn] == 0) {
+                            lastn = bn;
+                            break;
+                        }
+                    }
+                    try freeBlocks(ian[0..lastn]);
+                    try freeBlocks(&.{ia[b]});
+                }
+                try freeBlocks(ia[0..last]);
+                try freeBlocks(&.{inode.block[i]});
+            },
+            else => {
+                std.debug.panic("too many blocks ({}) for inode", .{i});
+            }
+        }
+        inode.block[i] = 0;
+    }
+}
+
 fn unlinkINode(ino:u32, inode:*INode) !void {
     // free blocks
     if (inode.links_count > 1) {
@@ -954,6 +1029,7 @@ fn unlinkINode(ino:u32, inode:*INode) !void {
         defer allocator.free(bkn);
         try getBlockNumRange(inode, sblk, eblk, bkn);
         try freeBlocks(bkn);
+        try freeINodeIndexBlocks(inode);
     }
     const gi = (ino - 1) / super_block.inodes_per_group;
     const ii = (ino - 1) % super_block.inodes_per_group;
@@ -963,6 +1039,7 @@ fn unlinkINode(ino:u32, inode:*INode) !void {
 
 fn freeINodeInGrp(grp:*BlockGroupDescriptor, gi:u32, idx_in_grp:u32) !void {
     const buf = try allocator.alloc(u8, block_size);
+    defer allocator.free(buf);
     const off = grp.inode_bitmap * block_size;
     _=try bdev.read(off, buf);
     var bs = bitset.bitSetFrom(buf);
@@ -1039,7 +1116,7 @@ fn writeBlockGroupDesc(g:u32, gd:*BlockGroupDescriptor) !void {
 }
 
 
-fn freeBlocks(bkn:[]u32) !void {
+fn freeBlocks(bkn:[]const align(1) u32) !void {
     const buf = try allocator.alloc(u8, block_size);
     defer allocator.free(buf);
     const Array = std.ArrayList(u32);

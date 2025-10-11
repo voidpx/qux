@@ -153,7 +153,7 @@ const lock = @import("lock.zig");
 fn handleSignal(s:i32) void {
     const t = task.getCurrentTask();
     if (t.signal.in_signal.cmpxchgWeak(false, true, .acquire, .monotonic)) |_| {
-        console.print("in signal, skip\n", .{});
+        //console.print("in signal, skip\n", .{});
         return;
     }
     const act = t.signal.sig_actions[@intCast(s)];

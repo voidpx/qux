@@ -24,6 +24,7 @@ const raw_sk_ops:net.SockOps = .{
     .recv_from = &recv_from,
     .recv = &recv,
     .release = &release,
+    .poll = &net.sockPoll,
 };
 
 fn newRawSock(proto:u32) !*net.Sock {

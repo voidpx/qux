@@ -1,3 +1,4 @@
+const fs = @import("../fs.zig");
 const task = @import("../task.zig");
 const lock = @import("../lock.zig");
 const ip = @import("ip.zig");
@@ -53,9 +54,9 @@ pub fn icmpRecv(nr:*net.NetReceiver, pkt:*net.Packet) !void {
         },
         .ECHO_REP => {
             const icmp_echo:*ICMPEcho = @ptrCast(@as([*]u8, @ptrCast(icmp_hdr)));
-            const sk = icmp_sk.get(@byteSwap(icmp_echo.id)) orelse return error.NoListeningSock;
+            const sk = icmp_sk.get(@byteSwap(icmp_echo.id)) orelse return; // return error.NoListeningSock;
             sk.rq.enqueue(pkt); 
-            task.wakeup(&sk.rwq);
+            net.notifyWaiters(sk, fs.PollIn);
             return;
         },
         else =>{

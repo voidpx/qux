@@ -12,6 +12,11 @@ pub fn List(comptime T:type) type {
             return Self{.list = .{}, .alloc = a};
         }
 
+        pub fn drop(this:*@This()) void {
+            while (this.popFirst()) |_| {
+            }
+        }
+
         pub fn newNode(self: *Self) !*Node {
             return try self.alloc.create(Node);
         }
