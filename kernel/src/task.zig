@@ -1165,6 +1165,7 @@ fn taskRegs(t:*Task) *idt.IntState {
 
 /// preemption must be disabled when entering
 fn setupTask(a:*const CloneArgs, task:*Task, cur:*Task) !void {
+    const parent = getTask(cur.pid) orelse &init_task; // parent process
     task.id = task_id;
     if (a.ptid) |p| p.* = task_id;
     if (a.ctid) |p| p.* = task_id;
@@ -1176,7 +1177,7 @@ fn setupTask(a:*const CloneArgs, task:*Task, cur:*Task) !void {
     task.on_wq = null;
     task.threads = .{};
     task.thread_link = .{.data = task};
-    task.parent = cur;
+    task.parent = parent;
     task.signal = .{};
     task.signal.sig_actions = .{sig.SigAction{}}**64;
     task.sched = .{};
@@ -1191,7 +1192,7 @@ fn setupTask(a:*const CloneArgs, task:*Task, cur:*Task) !void {
     var frame:*NewTaskFrame = @ptrFromInt(fp);
     @memset(@as([*]u8, @ptrCast(frame))[0..@sizeOf(NewTaskFrame)], 0);
     frame.ret_addr = @intFromPtr(&newTaskEntry);
-    task.pid = cur.pid;
+    task.pid = parent.pid;
     if (a.func) |f| { // kernel thread
         frame.rbx = @intFromPtr(f);
         frame.r12 = if (a.arg) |arg| @intFromPtr(arg) else 0;
@@ -1205,26 +1206,20 @@ fn setupTask(a:*const CloneArgs, task:*Task, cur:*Task) !void {
         frame.r14 = 0;
         frame.r15 = 0;
         frame.state = taskRegs(cur).*;
-        //const is = taskRegs(task);
-        //console.print("state:{any}\n", .{is});
         if (a.ustack != 0) {
             taskRegs(task).rsp = a.ustack;
         }
         if (!a.shareVM()) { // process
             task.pid = task.id;
-            task.mem = cur.mem.clone() catch unreachable;
-            task.fs = try cur.fs.clone();
-            task.fs.installFd(0, cur.fs.open_files.items[0].?.get().?);
-            task.fs.installFd(1, cur.fs.open_files.items[1].?.get().?);
-            task.fs.installFd(2, cur.fs.open_files.items[2].?.get().?);
-
+            task.mem = parent.mem.clone() catch unreachable;
+            task.fs = try parent.fs.clone();
+            if (parent.fs.getFile(0)) |f| task.fs.installFd(0, f);
+            if (parent.fs.getFile(1)) |f| task.fs.installFd(1, f);
+            if (parent.fs.getFile(2)) |f| task.fs.installFd(2, f);
         } else { // thread
-            task.pid = cur.pid;
             try task.mem.get();
-            task.fs = cur.fs.get().?;
-            const proc = getTask(cur.pid) orelse unreachable;
-            //task.thread_link = .{.data = task};
-            proc.threads.append(&task.thread_link);
+            task.fs = parent.fs.get().?;
+            parent.threads.append(&task.thread_link);
         }
         if (a.tls != 0) {
             task.fsbase = a.tls;
@@ -1234,7 +1229,7 @@ fn setupTask(a:*const CloneArgs, task:*Task, cur:*Task) !void {
     task.list = .{.prev = null, .next = null, .data = task};
     task_list.append(&task.list);
     task.sp = fp;
-    if (!cur.isThread()) cur.children.append(&task.child_link);
+    if (!task.isThread()) parent.children.append(&task.child_link);
     task.sched.share = if (runq.peek()) |t| t.sched.share else 0; 
 }
 

@@ -411,7 +411,7 @@ pub export fn sysNewFStatAt(dfd:i32, name: [*:0]const u8, st:*Stat, flags:u32) c
     if (dfd == AT_FDCWD) {
         dir = task.getCurrentTask().fs.cwd.?;
     } else {
-        dir = (task.getCurrentTask().fs.open_files.items[@intCast(dfd)] orelse return -1).path;
+        dir = (task.getCurrentTask().fs.getFile(@intCast(dfd)) orelse return -1).path;
     }
     const p = mounted_fs.ops.lookupAt(mounted_fs, dir, name[0..len], flags, 0) catch {
         return -syscall.ENOENT; // NOENT
@@ -436,7 +436,7 @@ pub export fn sysLStat(path: [*:0]const u8, st:*Stat) callconv(std.builtin.Calli
 pub export fn sysFStat(fd:u32, st:*Stat) callconv(std.builtin.CallingConvention.SysV) i64 {
     const l = lock.cli();
     defer lock.sti(l);
-    const file = task.getCurrentTask().fs.open_files.items[fd] orelse return -1;
+    const file = task.getCurrentTask().fs.getFile(fd) orelse return -1;
     return file.path.fs.ops.stat(file.path.fs, file.path, st) catch return -1;
     //return mounted_fs.ops.stat(mounted_fs, file.path, st) catch return -1;
 }
@@ -458,7 +458,7 @@ pub export fn sysDup(fd:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
     const l = lock.cli();
     defer lock.sti(l);
     const cur = task.getCurrentTask();
-    var f = cur.fs.open_files.items[fd] orelse return -1;
+    var f = cur.fs.getFile(fd) orelse return -1;
     const nfd = cur.fs.getFreeFd() catch return -1;
     f = f.get() orelse return -1;
     cur.fs.installFd(nfd, f);
@@ -472,10 +472,10 @@ pub export fn sysDup2(fd:u32, nfd:u32) callconv(std.builtin.CallingConvention.Sy
     if (nfd >= cur.fs.open_files.items.len) {
         cur.fs.ensureUnused(nfd + 1 - cur.fs.open_files.items.len) catch return -1;
     }
-    if (cur.fs.open_files.items[nfd]) |_| {
+    if (cur.fs.getFile(nfd)) |_| {
         _=sysClose(nfd);
     }
-    var f = cur.fs.open_files.items[fd] orelse return -1;
+    var f = cur.fs.getFile(fd) orelse return -1;
     f = f.get() orelse return -1;
     cur.fs.installFd(nfd, f); 
     return nfd;
@@ -529,8 +529,6 @@ const IoVec = extern struct {
 };
 
 pub export fn sysReadV(fd:u32, vec:[*]IoVec, vlen:usize) callconv(std.builtin.CallingConvention.SysV) i64 {
-    const l = lock.cli();
-    defer lock.sti(l);
     const f = task.getCurrentTask().fs.getFile(fd) orelse return -1;
     var len:i64 = -1;
     for (0..vlen) |v| {
@@ -626,7 +624,7 @@ pub fn openAt(dfd:i32, path: [*:0]const u8, flags:u32) !*File {
     if (dfd == AT_FDCWD) {
         dir = task.getCurrentTask().fs.cwd.?;
     } else {
-        dir = (task.getCurrentTask().fs.open_files.items[@intCast(dfd)] orelse return error.InvalidFd).path;
+        dir = (task.getCurrentTask().fs.getFile(@intCast(dfd)) orelse return error.InvalidFd).path;
     }
     const p = mounted_fs.ops.lookupAt(mounted_fs, dir, path[0..len], flags, 0) catch {
         return error.FileNotFound; // NOENT
@@ -659,10 +657,13 @@ pub fn open(path: [*:0]const u8, flags:u32, mode:u16) !*File {
     if (sysStat(path, &st) == 0) {
         file.size = st.st_size;
     }
-    if (file.size > 0 and (flags & 3) > 0 and
-        ((flags & O_TRUNC) > 0 or (flags & O_APPEND) == 0)) {
-        if (file.ops.truncate) |tr| {
-            try tr(file);
+    if (file.size > 0 and (flags & 3) > 0) { // write
+        if ((flags & O_TRUNC) > 0 or (flags & O_APPEND) == 0) {
+            if (file.ops.truncate) |tr| {
+                try tr(file);
+            }
+        } else {
+            file.pos = file.size;
         }
     }
     return file;
@@ -677,7 +678,7 @@ pub const SeekWhence = enum(u32) {
 pub export fn sysLSeek(fd: u32, off:i64, whence:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
     const l = lock.cli();
     defer lock.sti(l);
-    const f = task.getCurrentTask().fs.open_files.items[fd] orelse return -1;
+    const f = task.getCurrentTask().fs.getFile(fd) orelse return -1;
     const s:SeekWhence = @enumFromInt(whence);
     switch (s) {
         .set => f.pos = if (off >= 0) @intCast(off) else 0,
@@ -698,7 +699,7 @@ pub export fn sysLSeek(fd: u32, off:i64, whence:u32) callconv(std.builtin.Callin
 pub export fn sysGetDents64(fd: u32, buf: *DEntry, len:u64) callconv(std.builtin.CallingConvention.SysV) i64 {
     const l = lock.cli();
     defer lock.sti(l);
-    const f = task.getCurrentTask().fs.open_files.items[fd] orelse return -1;
+    const f = task.getCurrentTask().fs.getFile(fd) orelse return -1;
     const sz = (f.ops.readdir orelse return -1)(f, buf, len) catch return -1;
     //f.pos += @intCast(sz);
     return sz;
@@ -719,8 +720,6 @@ pub export fn sysSendFile(out_fd: u32, in_fd: u32, offset:*u64, count:u64) callc
 }
 
 pub export fn sysRead(fd: u32, buf: [*]u8, len:u64) callconv(std.builtin.CallingConvention.SysV) i64 {
-    const l = lock.cli();
-    defer lock.sti(l);
     const f = task.getCurrentTask().fs.getFile(fd) orelse return -1;
     const r = read(f, buf[0..len]) catch {
         return -1;
@@ -741,9 +740,7 @@ pub fn read(f:*File, buf:[]u8) !u64 {
 }
 
 pub export fn sysWrite(fd: u32, buf: [*]u8, len:u64) callconv(std.builtin.CallingConvention.SysV) i64 {
-    const l = lock.cli();
-    defer lock.sti(l);
-    const f = task.getCurrentTask().fs.open_files.items[fd] orelse return -1;
+    const f = task.getCurrentTask().fs.getFile(fd) orelse return -1;
         //TODO: fix this
     const r = (f.ops.write(f, buf[0..len])) catch return -1;
     return @intCast(r);

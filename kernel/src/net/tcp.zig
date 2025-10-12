@@ -59,11 +59,25 @@ fn tcpBind(sk:*net.Sock, addr:*const net.SockAddr) !void {
 }
 
 fn tcpConnect(sk:*net.Sock, addr:*const net.SockAddr) !void {
-    // TODO: implement connect 
-    sk.src_addr = .{
+    sk.dst_addr = .{
         .addr = @byteSwap(addr.addr),
         .port = @byteSwap(addr.port),
     };
+    if (sk.src_addr == null) {
+        try tcpBind(sk, &.{.port = @byteSwap(@as(u16, 1234))});
+    }
+    const tsk:*TcpSock = toTcpSock(sk);
+    tsk.ack = 0;
+    tsk.seq = isn;
+    const l = lock.cli();
+    defer lock.sti(l);
+    try conn_map.put(.{.src = sk.src_addr.?, .dst = sk.dst_addr.?}, tsk);
+    try sendSYN(tsk, &sk.dst_addr.?, false);
+    tsk.state = .SYN_SENT;
+    while (tsk.state != .ESTABLISHED) {
+        task.wait(&sk.rwq); 
+        if (task.getCurrentTask().signal.signalPending()) return error.InterruptedError;
+    }
 }
 
 fn newTcpSock(_:u32) !*net.Sock {
@@ -444,11 +458,11 @@ fn getAddrPair(pkt:*net.Packet) net.SockAddrPair {
     };
 }
 
-fn sendSYNACK(new_sk:*TcpSock, ap:*const net.SockAddrPair) !void {
+fn sendSYN(sk:*TcpSock, dst:*const net.SockAddr, ack:bool) !void {
     const len = @sizeOf(TcpHdr) + 4;
     const out = try ip.newPacket(len); // MSS option
     defer out.free();
-    sendPrepare(new_sk, &ap.src, out);
+    sendPrepare(sk, dst, out);
     const out_th:*TcpHdr = @ptrCast(out.getTransPacket().ptr);
     const opt_mss:[*]u8 = @as([*]u8, @ptrCast(out_th)) + @sizeOf(TcpHdr); 
     opt_mss[0] = 2; // MSS kind
@@ -457,9 +471,25 @@ fn sendSYNACK(new_sk:*TcpSock, ap:*const net.SockAddrPair) !void {
 
     out_th.setHdrLen(len);
     out_th.setSYN(true);
-    out_th.setACK(true);
+    out_th.setACK(ack);
 
     try ip.ipSend(out, &calcTcpSum);
+    sk.seq += 1; // SYN+ACK takes up 1 byte
+}
+
+fn sendSYNACK(new_sk:*TcpSock, ap:*const net.SockAddrPair) !void {
+    try sendSYN(new_sk, &ap.src, true);
+}
+
+fn recvSYNACK(sk:*TcpSock, pkt:*net.Packet) !void {
+    const l = lock.cli();
+    defer lock.sti(l);
+    const th:*TcpHdr = @ptrCast(pkt.getTransPacket().ptr);
+    if (sk.state != .SYN_SENT) return error.InvalidTcpState;
+    sk.ack = th.getSeq() + 1;
+    try sendACK(sk, pkt, false);
+    sk.state = .ESTABLISHED;
+    task.wakeup(&sk.sk.rwq);
 }
 
 fn recvSYN(pkt:*net.Packet, ap:*const net.SockAddrPair) !void {
@@ -484,7 +514,6 @@ fn recvSYN(pkt:*net.Packet, ap:*const net.SockAddrPair) !void {
         new_sk.sk.ops.release(&new_sk.sk);
         return e;
     };
-    new_sk.seq += 1; // SYN+ACK takes up 1 byte
     new_sk.state = .SYN_RCVD;
     conn_map.put(.{.src = ap.dst, .dst = ap.src}, new_sk) catch |e| {
         new_sk.sk.ops.release(&new_sk.sk);
@@ -538,7 +567,9 @@ fn handleRecv(ap:*const net.SockAddrPair, pkt:*net.Packet, th:*TcpHdr) !void {
     errdefer pkt.free();
     const sk = conn_map.get(.{.src = ap.dst, .dst = ap.src});
     if (sk) |ts| {
-        if (th.isSYN()) {
+        if (th.isSYN() and th.isACK()) {
+            try recvSYNACK(ts, pkt);
+        } else if (th.isSYN()) {
             if (ts.ack == th.getSeq() + 1) { // SYN retransmission
                 try sendSYNACK(ts, ap);
             } else {
