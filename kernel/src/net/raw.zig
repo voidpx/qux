@@ -69,6 +69,8 @@ fn connect(sk:*net.Sock, addr:*const net.SockAddr) anyerror!void {
 }
 
 fn addProtoSk(proto:net.TransProto, sk:*net.Sock, hdr:*icmp.ICMPHdr) !void {
+    const l = lock.cli();
+    defer lock.sti(l);
     switch (proto) {
         .ICMP =>  {
             const ty:icmp.ICMPType = @enumFromInt(hdr.type);
@@ -146,12 +148,16 @@ fn recv(sk:*net.Sock, buf:[]u8) anyerror![]u8{
     return try recv_from(sk, buf, null);
 }
 
-fn release(sk:*net.Sock) void {
+fn release(sk:*net.Sock) !void {
+    const l = lock.cli();
+    defer lock.sti(l);
     _=&sk;
     const rp = rawPriv(sk);
     // XXX: other proto?
-    const id:u16 = @truncate(@intFromPtr(rp.priv.?));
-    _=icmp.removeIcmpSk(id);
+    if (rp.priv) |p| {
+        const id:u16 = @truncate(@intFromPtr(p));
+        _=icmp.removeIcmpSk(id);
+    }
     alloc.destroy(sk);
     alloc.destroy(rp);
 }

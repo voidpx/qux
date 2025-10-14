@@ -2,23 +2,12 @@ const std = @import("std");
 const pic = @import("pic.zig");
 const idt = @import("idt.zig");
 const sig = @import("signal.zig");
+const lib = @import("lib/list.zig");
 
 const TaskList = std.DoublyLinkedList(*Task);
-pub const WaitQueue = std.DoublyLinkedList(*Task);
+pub const WaitQueue = lib.LinkedList(*Task);
 
-pub const WaitQueueList = std.DoublyLinkedList(*WaitQueue);
-
-fn wqPop(wq:*WaitQueue) ?*WaitQueue.Node {
-    var n = wq.popFirst() orelse return null;
-    n.prev = null;
-    n.next = null;
-    return n;
-}
-
-fn wqRemove(wq:*WaitQueue, n:*WaitQueue.Node) void {
-    if ((n.prev == null and n.next == null) or wq.len == 0) return;
-    wq.remove(n);
-}
+//pub const WaitQueueList = std.DoublyLinkedList(*WaitQueue);
 
 pub const TaskState = enum(u8) {
     new,
@@ -1106,20 +1095,21 @@ pub fn wait(wq: *WaitQueue) void {
     scheduleWithIF();
 }
 
-pub fn wakeupList(wql:*WaitQueueList) void {
-    const v = lock.cli();
-    defer lock.sti(v);
-    while (wql.popFirst()) |n| {
-        n.prev = null;
-        n.next = null;
-        wakeup(n.data);
-    }
-}
+//pub fn wakeupList(wql:*WaitQueueList) void {
+//    const v = lock.cli();
+//    defer lock.sti(v);
+//    if (wql.len == 0) return;
+//    while (wql.popFirst()) |n| {
+//        n.prev = null;
+//        n.next = null;
+//        wakeup(n.data);
+//    }
+//}
 
 pub fn wakeup(wq:*WaitQueue) void {
     const v = lock.cli();
     defer lock.sti(v);
-    while (wqPop(wq)) |n| {
+    while (wq.popFirst()) |n| {
         const t = n.data;
         t.on_wq = null;
         wakeupTaskUnlocked(t);

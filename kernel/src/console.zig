@@ -287,7 +287,7 @@ fn consoleInput(char:u32) void {
         _=writer.write(&ba) catch unreachable;
     } else {
         if (!input_buf.isFull()) {
-            if (input_wq.len == 0) { // no one is waiting for input
+            if (input_wq.len == 0 and console_pwl.wq.len == 0) { // no one is waiting for input
                 return;
             }
             input_buf.write(@truncate(c)) catch unreachable;
@@ -295,9 +295,11 @@ fn consoleInput(char:u32) void {
             _=writer.write(&ba) catch unreachable;
             if (c == '\n') {
                 task.wakeup(&input_wq);
+                task.wakeup(&console_pwl.wq);
             }
         } else {
             task.wakeup(&input_wq);
+            task.wakeup(&console_pwl.wq);
         }
     }
 }
@@ -330,16 +332,15 @@ fn consolePoll(_:*fs.File, pw:fs.PollWait) anyerror!fs.PollResult {
     }
     if (r == 0) { // added only if no event yet, sync with release!!
         console_pwl.events = pw.events;
-        console_pwl.wq_list.append(pw.wqn);
+        console_pwl.wq.append(pw.wqn);
     }
-    return fs.PollResult{.wait = pw, .events = r, .priv = null, .release = &releasePollResult};
+    return fs.PollResult{.wqn = pw.wqn, .events = r, .priv = null, .release = &releasePollResult};
 }
 fn releasePollResult(pr:fs.PollResult) void {
     if (pr.events > 0) return; // wait queue was only added if events == 0
     const l = lock.cli();
     defer lock.sti(l);
-    if (pr.wait.wqn.prev == null and pr.wait.wqn.next == null) return;
-    console_pwl.wq_list.remove(pr.wait.wqn);
+    console_pwl.wq.remove(pr.wqn);
 }
 
 const console_fsop:fs.FsOp = .{.stat = &dummyStat, .lookup = undefined, .lookupAt = undefined, .copy_path = undefined, .free_path = &dummyFreePath};

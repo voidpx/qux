@@ -30,7 +30,7 @@ pub const File = struct {
     path:Path,
     size:u64 = 0,
     ops:*const FileOps,
-    pwq_list:task.WaitQueueList = .{},
+    closed:bool = false,
     fn dtor(f:*File) void {
         if (f.ops.finalize) |fi| {
             fi(f) catch {};
@@ -164,7 +164,8 @@ pub const FileOps = struct {
     ioctl:?*const fn(file:*File, cmd:u32, arg:u64) i64 = null,
     readdir:?*const fn(file:*File, d:*DEntry, len:u64) anyerror!i64 = null,
     poll:?*const fn(file:*File, pw:PollWait) anyerror!PollResult = null,
-    truncate:?*const fn(file:*File) anyerror!void = null,
+    truncate:?*const fn(file:*File, len:u32) anyerror!void = null,
+    close:?*const fn(file:*File) anyerror!void = null,
 };
 
 pub const MountedFs = struct {
@@ -215,18 +216,18 @@ pub const PollFd = extern struct {
 
 pub const PollWait = struct {
     events:u16 = 0,
-    wqn:*task.WaitQueueList.Node,
+    wqn:*task.WaitQueue.Node,
 };
 
 pub const PollWaitList = struct {
     events:u16 = 0,
-    wq_list:task.WaitQueueList = .{},
+    wq:task.WaitQueue = .{},
 };
 
 pub const PollResult = struct {
     events:u16 = 0,
     priv:?*anyopaque = null,
-    wait:PollWait,
+    wqn:*task.WaitQueue.Node,
     release:*const fn(pr:@This()) void,
 };
 
@@ -241,29 +242,35 @@ pub export fn sysPoll(fds:?[*]PollFd, nfds:u32, timeout:i32) callconv(std.builti
     mem.checkUserAddr(fds) catch return -1;
     // XXX: problematic!!
     const f = fds.?;
+    const t = task.getCurrentTask();
     var prs:PrList = PrList.init(alloc);
+    var wq = task.WaitQueue{};
+    const nlist = alloc.alloc(task.WaitQueue.Node, nfds) catch return -1;
+    for (0..nlist.len) |i| {
+        const n = &nlist[i];
+        n.* = .{.data = t};
+    }
     defer {
         releasePrs(&prs);
+        alloc.free(nlist);
         prs.deinit();
     }
     var rn:i32 = 0;
-    var wq = task.WaitQueue{};
-    var node = task.WaitQueueList.Node{.data = &wq};
-    rn = doOnePoll(&node, f, nfds, &prs);
+    rn = doOnePoll(nlist, f[0..nfds], &prs);
     if (rn != 0) return rn;
     const to = time.waitTimeout(&wq, timeout);
     // do another
     releasePrs(&prs);
-    rn = doOnePoll(&node, f, nfds, &prs);
+    rn = doOnePoll(nlist, f[0..nfds], &prs);
     if (rn != 0) return rn;
     if (to == 0) return 0;
     return -1;
 }
 
-fn doOnePoll(wqn:*task.WaitQueueList.Node, f:[*]PollFd, nfds:u32, rl:*PrList) i32 {
+fn doOnePoll(wqns:[]task.WaitQueue.Node, f:[]PollFd, rl:*PrList) i32 {
     const t = task.getCurrentTask();
     var rn:i32 = 0;
-    for (0..nfds) |i| {
+    for (0..f.len) |i| {
         if (f[i].events == 0) continue;
         const fd = f[i].fd;
         if (fd < 0) continue;
@@ -272,7 +279,7 @@ fn doOnePoll(wqn:*task.WaitQueueList.Node, f:[*]PollFd, nfds:u32, rl:*PrList) i3
             f[i].revents = f[i].events;
             continue;
         };
-        const pr = p(file, .{.events = f[i].events, .wqn = wqn}) catch {
+        const pr = p(file, .{.events = f[i].events, .wqn = &wqns[i]}) catch {
             return -1;
         };
         rl.append(pr) catch return -1;
@@ -313,6 +320,7 @@ pub fn init() void {
     syscall.registerSysCall(syscall.SysCallNo.sys_newlstat, &sysLStat);
     syscall.registerSysCall(syscall.SysCallNo.sys_getdents64, &sysGetDents64);
     syscall.registerSysCall(syscall.SysCallNo.sys_poll, &sysPoll);
+    syscall.registerSysCall(syscall.SysCallNo.sys_ftruncate, &sysFTruncate);
 
 }
 
@@ -434,11 +442,18 @@ pub export fn sysLStat(path: [*:0]const u8, st:*Stat) callconv(std.builtin.Calli
 }
 
 pub export fn sysFStat(fd:u32, st:*Stat) callconv(std.builtin.CallingConvention.SysV) i64 {
-    const l = lock.cli();
-    defer lock.sti(l);
     const file = task.getCurrentTask().fs.getFile(fd) orelse return -1;
     return file.path.fs.ops.stat(file.path.fs, file.path, st) catch return -1;
     //return mounted_fs.ops.stat(mounted_fs, file.path, st) catch return -1;
+}
+
+pub fn close(file:*File) !void {
+    const l = lock.cli();
+    defer lock.sti(l);
+    if (!file.closed and file.ops.close != null) {
+        try file.ops.close.?(file);
+        file.closed = true;
+    }
 }
 
 pub export fn sysClose(fd:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
@@ -455,8 +470,6 @@ const F_DUPFD  =	0;
 const F_DUPFD_CLOEXEC = 1030;
 
 pub export fn sysDup(fd:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
-    const l = lock.cli();
-    defer lock.sti(l);
     const cur = task.getCurrentTask();
     var f = cur.fs.getFile(fd) orelse return -1;
     const nfd = cur.fs.getFreeFd() catch return -1;
@@ -466,8 +479,6 @@ pub export fn sysDup(fd:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
 }
 
 pub export fn sysDup2(fd:u32, nfd:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
-    const l = lock.cli();
-    defer lock.sti(l);
     const cur = task.getCurrentTask();
     if (nfd >= cur.fs.open_files.items.len) {
         cur.fs.ensureUnused(nfd + 1 - cur.fs.open_files.items.len) catch return -1;
@@ -485,8 +496,6 @@ const F_SETFD=2;
 const F_GETFL=3;	
 const F_SETFL=4;	
 pub export fn sysFCntl(fd:u32, cmd:u32, arg:u64) callconv(std.builtin.CallingConvention.SysV) i64 {
-    const l = lock.cli();
-    defer lock.sti(l);
     switch (cmd) {
     F_DUPFD, F_DUPFD_CLOEXEC => {
         const cur = task.getCurrentTask();
@@ -515,8 +524,6 @@ pub export fn sysFCntl(fd:u32, cmd:u32, arg:u64) callconv(std.builtin.CallingCon
 }
 
 pub export fn sysIoCtl(fd:u32, cmd:u32, arg:u64) callconv(std.builtin.CallingConvention.SysV) i64 {
-    const l = lock.cli();
-    defer lock.sti(l);
     const t = task.getCurrentTask();
     const f = t.fs.getFile(fd) orelse return -1;
     const op = f.ops.ioctl orelse return -1;
@@ -570,6 +577,16 @@ pub export fn sysChDir(path: [*:0]const u8) callconv(std.builtin.CallingConventi
     const old = t.fs.cwd.?;
     t.fs.cwd = fp;
     mounted_fs.ops.free_path(mounted_fs, old);
+    return 0;
+}
+
+pub export fn sysFTruncate(fd:i32, length:u64) callconv(std.builtin.CallingConvention.SysV) i64 {   
+    const l = lock.cli();
+    defer lock.sti(l);
+    const t = task.getCurrentTask();
+    const file = t.fs.getFile(@intCast(fd)) orelse return -1;
+    const tr = file.ops.truncate orelse return -1;
+    tr(file, @truncate(length)) catch return -1;
     return 0;
 }
 
@@ -660,7 +677,7 @@ pub fn open(path: [*:0]const u8, flags:u32, mode:u16) !*File {
     if (file.size > 0 and (flags & 3) > 0) { // write
         if ((flags & O_TRUNC) > 0 or (flags & O_APPEND) == 0) {
             if (file.ops.truncate) |tr| {
-                try tr(file);
+                try tr(file, 0);
             }
         } else {
             file.pos = file.size;
@@ -692,7 +709,7 @@ pub export fn sysLSeek(fd: u32, off:i64, whence:u32) callconv(std.builtin.Callin
         }
 
     }
-    return 0;
+    return @intCast(f.pos);
 
 }
 

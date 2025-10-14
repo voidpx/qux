@@ -88,6 +88,28 @@ fn onExit(ctx:?*anyopaque, _:*task.Task) void {
 
 const console = @import("console.zig");
 
+const DynaTimer = struct {
+    timer:Timer,
+    func:*const fn(ctx:?*anyopaque) void,
+};
+
+fn dynaTimerCall(t:*Timer) void {
+    const dt:*DynaTimer = @ptrCast(@as([*]u8, @ptrCast(t)) - @offsetOf(DynaTimer, "timer")); 
+    dt.func(dt.timer.ctx);
+    mem.allocator.destroy(t);
+}
+
+pub fn setupTimer(f:*const fn(ctx:?*anyopaque) void, ctx:?*anyopaque, to:i32) !void {
+    const dt = try mem.allocator.create(DynaTimer);  
+    dt.timer.node = .{.data = &dt.timer};
+    dt.timer.ctx = ctx;
+    dt.func = f;
+    dt.timer.func = &dynaTimerCall;
+    const nf = getTime().addMillis(to).getAsMilliSeconds();
+    dt.timer.next_fire = nf;
+    addTimer(&dt.timer); 
+}
+
 pub fn waitTimeout(wq:*task.WaitQueue, to:i64) i64 {
     if (to == 0) return 0;
     const v = lock.cli();

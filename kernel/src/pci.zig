@@ -128,9 +128,9 @@ pub fn init() void {
     pci_devs = @TypeOf(pci_devs).init(alloc);
     var pci_it = PciDevIter{};
     while (pci_it.next()) |d| {
-        console.print("pci vendor: 0x{x}, device: 0x{x}, " 
-        ++ " class: 0x{x}, sub_class: 0x{x}, prog_if: 0x{x}\n", 
-        .{d.vendor, d.device, d.class, d.sub_class, d.pi});
+        //console.print("pci vendor: 0x{x}, device: 0x{x}, " 
+        //++ " class: 0x{x}, sub_class: 0x{x}, prog_if: 0x{x}\n", 
+        //.{d.vendor, d.device, d.class, d.sub_class, d.pi});
         pci_devs.append(d) catch unreachable;
         //d.readBAR();
     }

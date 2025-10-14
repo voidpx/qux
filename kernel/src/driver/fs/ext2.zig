@@ -48,21 +48,35 @@ const ext2fs_fops = fs.FileOps {
     .truncate = &truncate,
 };
 
-fn truncate(file:*fs.File) !void {
+fn truncate(file:*fs.File, len:u32) !void {
     const dent:*DirEntObj = @alignCast(@ptrCast(file.path.entry.priv));
     var inode = try readINode(dent.dentry.inode);
-    if (inode.size > 0) {
-        const sblk = 0;
+    if (inode.size == len) {
+        return;
+    } else if (inode.size > len) {
+        const sblk = (len + block_size - 1) / block_size;
         const eblk = (inode.size + block_size - 1) / block_size;
         const bkn = try allocator.alloc(u32, eblk - sblk);
         defer allocator.free(bkn);
         try getBlockNumRange(&inode, sblk, eblk, bkn);
         try freeBlocks(bkn);
         try freeINodeIndexBlocks(&inode);
+    } else if (inode.size < len) {
+        const pos = file.pos;
+        defer file.pos = pos;
+        file.pos = file.size;
+        const buf = try allocator.alloc(u8, len - inode.size);
+        defer allocator.free(buf);
+        @memset(buf, 0);
+        const wl = try write(file, buf);
+        if (wl != buf.len) return error.ErrorTruncatingFile;
     }
-    inode.blocks = 0;
-    inode.size = 0;
-    inode.ctime = @intCast(time.getTime().sec);
+    file.size = len;
+    inode.size = len;
+    inode.blocks = len >> 9;
+    const now:u32 = @intCast(time.getTime().sec);
+    inode.ctime = now;
+    inode.mtime = now;
     try writeINode(dent.dentry.inode, &inode);
 }
 

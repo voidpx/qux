@@ -101,7 +101,7 @@ pub const SockOps = struct {
     send:*const fn(sk:*Sock, buf:[]const u8) anyerror!usize,
     recv_from:*const fn(sk:*Sock, buf:[]u8, addr:?*SockAddr) anyerror![]u8,
     recv:*const fn(sk:*Sock, buf:[]u8) anyerror![]u8,
-    release:*const fn(sk:*Sock) void,
+    release:*const fn(sk:*Sock) anyerror!void,
     poll:*const fn(sk:*Sock, pw:fs.PollWait) anyerror!fs.PollResult,
 };
 
@@ -388,24 +388,26 @@ pub fn sockPoll(sk:*Sock, pw:fs.PollWait) anyerror!fs.PollResult {
     }
     if (r == 0) { // added only if no event yet, sync with release!!
         sk.pwl.events = pw.events;
-        sk.pwl.wq_list.append(pw.wqn);
+        sk.pwl.wq.append(pw.wqn);
     }
-    return fs.PollResult{.wait = pw, .events = r, .priv = sk, .release = &releasePollResult};
+    return fs.PollResult{.wqn = pw.wqn, .events = r, .priv = sk, .release = &releasePollResult};
 }
 
 fn releasePollResult(pr:fs.PollResult) void {
+    const sk:*Sock = @alignCast(@ptrCast(pr.priv.?)); 
     if (pr.events > 0) return; // wait queue was only added if events == 0
     const l = lock.cli();
     defer lock.sti(l);
-    const sk:*Sock = @alignCast(@ptrCast(pr.priv.?)); 
-    if (pr.wait.wqn.prev == null and pr.wait.wqn.next == null) return;
-    sk.pwl.wq_list.remove(pr.wait.wqn);
+    sk.pwl.wq.remove(pr.wqn);
 }
 
 const sk_fops:fs.FileOps = .{.read = &read, 
     .write = &write, 
     .poll = &poll,
-    .finalize = &finalize};
+    .close = &close,
+    .finalize = &fs.close,
+
+};
 
 fn poll(file:*fs.File, pw:fs.PollWait) !fs.PollResult {
     const sk:*Sock = @alignCast(@ptrCast(file.ctx.?));
@@ -420,7 +422,7 @@ pub fn notifyWaiters(sk:*Sock, events:u16) void {
         task.wakeup(&sk.wwq);
     }
     if (events & sk.pwl.events > 0) {
-        task.wakeupList(&sk.pwl.wq_list);
+        task.wakeup(&sk.pwl.wq);
     }
 }
 
@@ -433,9 +435,9 @@ fn write(file:*fs.File, buf:[]const u8) anyerror!usize {
     return try sk.ops.send(sk, buf);
 }
     // called right before *File is freed
-fn finalize(file:*fs.File) anyerror!void {
+fn close(file:*fs.File) anyerror!void {
     const sk:*Sock = @alignCast(@ptrCast(file.ctx.?));
-    sk.ops.release(sk);
+    try sk.ops.release(sk);
 }
 
 pub export fn sysSetSockOpt(fd:u32, level:u32, name:u32, val:?[*]u8, len:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
@@ -457,7 +459,7 @@ pub export fn sysSocket(family:u32, ptype:u32, proto:u32) callconv(std.builtin.C
     const nf = sock_map.get(@enumFromInt(ptype)) orelse return -1;
     const sk = nf.new_sock(proto) catch return -1;
     const file = fs.File.get_new_ex(&sk_fops) catch {
-        sk.ops.release(sk);
+        sk.ops.release(sk) catch return -1;
         return -1;
     };
     file.ctx = sk;
@@ -501,7 +503,7 @@ fn doAccept(fd:u32, addr:?*SockAddr, _:u32) !i64 {
     const f = t.fs.getFile(fd) orelse return -1;
     const sk:*Sock = @alignCast(@ptrCast(f.ctx.?));
     const new = try sk.ops.accept(sk);
-    errdefer new.ops.release(new);
+    errdefer new.ops.release(new) catch {};
     const l = lock.cli();
     defer lock.sti(l);
     const nfd = try t.fs.getFreeFd();
@@ -541,6 +543,8 @@ pub export fn sysSend(fd:u32, buf:[*]u8, len:usize, _:u32) callconv(std.builtin.
 }
 
 pub export fn sysRecv(fd:u32, buf:[*]u8, len:usize, _:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const l = lock.cli();
+    defer lock.sti(l);
     const t = task.getCurrentTask();
     const f = t.fs.getFile(fd) orelse return -1;
     const r = (read(f, buf[0..len]) catch |e| {
@@ -562,6 +566,8 @@ pub export fn sysSendTo(fd:u32, buf:[*]u8, len:usize, _:u32, addr:?*const SockAd
 }
 
 pub export fn sysRecvFrom(fd:u32, buf:[*]u8, len:usize, _:u32, addr:?*SockAddr, _:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    const l = lock.cli();
+    defer lock.sti(l);
     const t = task.getCurrentTask();
     const f = t.fs.getFile(fd) orelse return -1;
     const sk:*Sock = @alignCast(@ptrCast(f.ctx.?));

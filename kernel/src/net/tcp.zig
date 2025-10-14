@@ -1,3 +1,4 @@
+const time = @import("../time.zig");
 const lock = @import("../lock.zig");
 const std = @import("std");
 const task = @import("../task.zig");
@@ -46,14 +47,37 @@ fn tcpAccept(sk:*net.Sock) !*net.Sock {
     }
 }
 
+fn getFreePort() !u16 {
+    // XXX: dummy 
+    var p:u16 = 0xffff;
+    while (p >= 1024): (p -= 1) {
+        var it = listen_map.keyIterator();
+        while (it.next()) |a| {
+            if (p == a.port) continue; 
+        }
+
+        var ita = conn_map.keyIterator();
+        while (ita.next()) |a| {
+            if (p == a.src.port) continue; 
+        }
+
+        return p;
+    }
+    return error.AddressInUse;
+}
+
 fn tcpBind(sk:*net.Sock, addr:*const net.SockAddr) !void {
     //TODO: check already bound addresses
 
     //sk.src_addr = addr.*;
-    // bind on the dummy address
+    var port = addr.port;
+    if (port == 0) {
+        port = @byteSwap(try getFreePort());
+    }
+    
     sk.src_addr = net.SockAddr{
         .family = 0,
-        .port = @byteSwap(addr.port),
+        .port = @byteSwap(port),
         .addr = @byteSwap(net.net_dev.ipv4_addr),
     };
 }
@@ -86,12 +110,21 @@ fn newTcpSock(_:u32) !*net.Sock {
     return &sk.sk;
 }
 
-fn tcpReleaseSock(sk:*net.Sock) void {
+fn tcpReleaseSock(sk:*net.Sock) !void {
+    const l = lock.cli();
+    defer lock.sti(l);
     const tsk:*TcpSock = toTcpSock(sk);
+    errdefer tsk.free();
     if (tsk.state == .LISTEN) {
         _ = listen_map.remove(tsk.sk.src_addr.?);
     } else if (sk.src_addr != null and sk.dst_addr != null) {
-        _=conn_map.remove(.{.src = sk.src_addr.?, .dst = sk.dst_addr.?});
+        if (tsk.state == .ESTABLISHED) {
+            try sendFINACK(tsk);
+            tsk.state = .FIN_WAIT1;
+            _=time.waitTimeout(&sk.rwq, 3000);
+        }
+        const ap:net.SockAddrPair = .{.src = sk.src_addr.?, .dst = sk.dst_addr.?};
+        _=conn_map.remove(ap);
     }
     tsk.free();
 }
@@ -174,7 +207,7 @@ fn tcpReceive(sk:*net.Sock, buf:[]u8) anyerror![]u8 {
         const off = @min(sk.rq.read_pos, data.len);
         const len = @min(buf.len, data.len - off);
         const ret = buf[0..len];
-        @memcpy(ret, data[off..len]);
+        @memcpy(ret, data[off..off+len]);
         sk.rq.read_pos += len;
         if (sk.rq.read_pos >= data.len) {
             const h =sk.rq.dequeue();
@@ -511,33 +544,45 @@ fn recvSYN(pkt:*net.Packet, ap:*const net.SockAddrPair) !void {
     new_sk.seq = isn;
     new_sk.ack = th.getSeq() + 1;
     sendSYNACK(new_sk, ap) catch |e| {
-        new_sk.sk.ops.release(&new_sk.sk);
+        new_sk.sk.ops.release(&new_sk.sk) catch return e;
         return e;
     };
     new_sk.state = .SYN_RCVD;
     conn_map.put(.{.src = ap.dst, .dst = ap.src}, new_sk) catch |e| {
-        new_sk.sk.ops.release(&new_sk.sk);
+        new_sk.sk.ops.release(&new_sk.sk) catch return e;
         return e;
     };
 }
 
-fn sendACK(sk:?*TcpSock, pkt:*net.Packet, fin:bool) !void {
-    const thi:*TcpHdr = @ptrCast(pkt.getTransPacket().ptr);
+fn sendFINACK(sk:*TcpSock) !void {
+    try sendACK(sk, null, true);
+}
+
+fn sendACK(sk:?*TcpSock, pkt:?*net.Packet, fin:bool) !void {
+    std.debug.assert(sk != null or pkt != null);
     const out = try ip.newPacket(@sizeOf(TcpHdr));
     defer out.free();
-    const ap = getAddrPair(pkt);
+    const ap:net.SockAddrPair = if (pkt) |p| getAddrPair(p) else .{.src = sk.?.sk.dst_addr.?, .dst  =sk.?.sk.src_addr.?};
     sendPrepare0(&ap.dst, &ap.src, out);
     const th:*TcpHdr = @ptrCast(out.getTransPacket().ptr);
     th.setHdrLen(@sizeOf(TcpHdr));
-    const ack = @addWithOverflow(thi.getSeq(), getTcpPktLen(thi, pkt))[0]; 
-    if (sk) |s| {
-        th.setSeq(s.seq);
-        if (s.ack < thi.getSeq()) {
-            console.print("tcp packet received out of order\n", .{});
-            return;
-        } else if (s.ack == thi.getSeq()) {
-            s.ack = ack;
+
+    const thi:?*TcpHdr = if (pkt) |p| @ptrCast(p.getTransPacket().ptr) else null;
+    var ack:u32 = undefined;
+    if (thi) |ti| {
+        ack = @addWithOverflow(ti.getSeq(), getTcpPktLen(ti, pkt.?))[0]; 
+        if (sk) |s| {
+            th.setSeq(s.seq);
+            if (s.ack < ti.getSeq()) {
+                console.print("tcp packet received out of order\n", .{});
+                return;
+            } else if (s.ack == ti.getSeq()) {
+                s.ack = ack;
+            }
         }
+    } else {
+        ack = sk.?.ack;
+        th.setSeq(sk.?.seq);
     }
     th.setAck(ack);
     th.setACK(true);
@@ -545,6 +590,31 @@ fn sendACK(sk:?*TcpSock, pkt:*net.Packet, fin:bool) !void {
     try ip.ipSend(out, &calcTcpSum);
     if (fin and sk != null) sk.?.seq = @addWithOverflow(sk.?.seq, 1)[0];
 }
+
+//fn sendACK(sk:?*TcpSock, pkt:*net.Packet, fin:bool) !void {
+//    const thi:*TcpHdr = @ptrCast(pkt.getTransPacket().ptr);
+//    const out = try ip.newPacket(@sizeOf(TcpHdr));
+//    defer out.free();
+//    const ap = getAddrPair(pkt);
+//    sendPrepare0(&ap.dst, &ap.src, out);
+//    const th:*TcpHdr = @ptrCast(out.getTransPacket().ptr);
+//    th.setHdrLen(@sizeOf(TcpHdr));
+//    const ack = @addWithOverflow(thi.getSeq(), getTcpPktLen(thi, pkt))[0]; 
+//    if (sk) |s| {
+//        th.setSeq(s.seq);
+//        if (s.ack < thi.getSeq()) {
+//            console.print("tcp packet received out of order\n", .{});
+//            return;
+//        } else if (s.ack == thi.getSeq()) {
+//            s.ack = ack;
+//        }
+//    }
+//    th.setAck(ack);
+//    th.setACK(true);
+//    if (fin) th.setFIN(true);
+//    try ip.ipSend(out, &calcTcpSum);
+//    if (fin and sk != null) sk.?.seq = @addWithOverflow(sk.?.seq, 1)[0];
+//}
 
 fn recvFIN(tsk:?*TcpSock, pkt:*net.Packet) !void {
     const sk = tsk orelse {
@@ -554,8 +624,13 @@ fn recvFIN(tsk:?*TcpSock, pkt:*net.Packet) !void {
     if (sk.state != .CLOSED) {
         sk.ack = @addWithOverflow(sk.ack, 1)[0];
         try sendACK(sk, pkt, false);
-        try sendACK(sk, pkt, true);
-        sk.state = .LAST_ACK;
+        if (sk.state == .FIN_WAIT2 or sk.state == .FIN_WAIT1) {
+            sk.state = .CLOSED;
+            task.wakeup(&sk.sk.rwq);
+        } else {
+            try sendACK(sk, pkt, true);
+            sk.state = .LAST_ACK;
+        }
     } else {
         console.log("FIN received in wrong state: {}\n", .{sk.state});
     }
@@ -587,6 +662,9 @@ fn handleRecv(ap:*const net.SockAddrPair, pkt:*net.Packet, th:*TcpHdr) !void {
         } else {
             // connected or half open
             blk: switch (ts.state) {
+                .FIN_WAIT1 => {
+                    ts.state = .FIN_WAIT2;
+                },
                 .SYN_RCVD => {
                     if (th.isACK() and ts.seq == th.getAck()) {
                         // finished 3-way handshake
@@ -618,8 +696,8 @@ fn handleRecv(ap:*const net.SockAddrPair, pkt:*net.Packet, th:*TcpHdr) !void {
                     return; // return here so packet is not freed as it's pushed to upper layer
                 },
                 .LAST_ACK => {
+                    ts.state = .CLOSED;
                     if (th.getAck() == ts.seq) {
-                        ts.state = .CLOSED;
                         //console.log("FIN ACKED\n", .{});
                     }
                     _=conn_map.remove(.{.src = ap.dst, .dst = ap.src});
