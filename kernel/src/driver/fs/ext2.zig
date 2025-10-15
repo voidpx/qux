@@ -498,7 +498,7 @@ fn write(file:*fs.File, buf:[]const u8) anyerror!usize {
         }
     }
     try getBlockNumRange(&inode, sblk, eblk, bkn);
-    const foff = file.pos & ~(block_size);
+    const foff = file.pos & (block_size - 1);
     var woff:u32 = 0;
     for (0..w_blks) |i| {
         const b = bkn[i];

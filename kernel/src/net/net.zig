@@ -53,6 +53,16 @@ pub const NetDevOps = struct {
 
 pub var net_dev:*NetDev = undefined;
 
+pub const MsgHdr = extern struct {
+    addr:?*SockAddr,
+    a_len:u32,
+    msg:?[*]fs.IoVec,
+    m_len:usize,
+    c_msg:?*anyopaque = null,
+    c_len:usize,
+    flags:u32,
+};
+
 //const packets:PacketQueue = .{};
 pub const PacketQueue = struct {
     head:?*Packet = null,
@@ -372,6 +382,7 @@ pub fn init() void {
     syscall.registerSysCall(syscall.SysCallNo.sys_sendto, &sysSendTo);
     syscall.registerSysCall(syscall.SysCallNo.sys_setsockopt, &sysSetSockOpt);
     syscall.registerSysCall(syscall.SysCallNo.sys_getsockname, &sysGetSockName);
+    syscall.registerSysCall(syscall.SysCallNo.sys_recvmsg, &sysRecvMsg);
 
 }
 
@@ -454,10 +465,12 @@ pub export fn sysSocket(family:u32, ptype:u32, proto:u32) callconv(std.builtin.C
     _=&proto;
     const l = lock.cli();
     defer lock.sti(l);
+    const pt:u8 = @truncate(ptype);
     const t = task.getCurrentTask();
     const fd = t.fs.getFreeFd() catch return -1;
-    const nf = sock_map.get(@enumFromInt(ptype)) orelse return -1;
+    const nf = sock_map.get(@enumFromInt(pt)) orelse return -1;
     const sk = nf.new_sock(proto) catch return -1;
+    sk.opts = ptype & ~@as(u32, 0xff);
     const file = fs.File.get_new_ex(&sk_fops) catch {
         sk.ops.release(sk) catch return -1;
         return -1;
@@ -548,10 +561,7 @@ pub export fn sysRecv(fd:u32, buf:[*]u8, len:usize, _:u32) callconv(std.builtin.
     const t = task.getCurrentTask();
     const f = t.fs.getFile(fd) orelse return -1;
     const r = (read(f, buf[0..len]) catch |e| {
-        if (e == error.InterruptedError) {
-            return -syscall.EINTR;
-        }
-        return -1;
+        return -@as(i64, @intFromError(e));
     }).len;
     return @intCast(r);
 }
@@ -565,7 +575,9 @@ pub export fn sysSendTo(fd:u32, buf:[*]u8, len:usize, _:u32, addr:?*const SockAd
     return @intCast(r);
 }
 
-pub export fn sysRecvFrom(fd:u32, buf:[*]u8, len:usize, _:u32, addr:?*SockAddr, _:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+pub export fn sysRecvFrom(fd:u32, buf:[*]u8,
+    len:usize, _:u32, addr:?*SockAddr, flags:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    _=&flags;
     const l = lock.cli();
     defer lock.sti(l);
     const t = task.getCurrentTask();
@@ -580,3 +592,42 @@ pub export fn sysRecvFrom(fd:u32, buf:[*]u8, len:usize, _:u32, addr:?*SockAddr, 
     }).len;
     return @intCast(r);
 }
+
+pub export fn sysRecvMsg(fd:u32, msg:?*MsgHdr, flags:u32) callconv(std.builtin.CallingConvention.SysV) i64 {
+    _=&flags;
+    const m = msg orelse return -1;
+    const v = m.msg orelse return 0;
+    const l = lock.cli();
+    defer lock.sti(l);
+    const t = task.getCurrentTask();
+    const f = t.fs.getFile(fd) orelse return -1;
+    const sk:*Sock = @alignCast(@ptrCast(f.ctx.?));
+    var ret:i64 = 0;
+    outer: for (0..m.m_len) |i| {
+        const vc = v[i];
+        var off:usize = 0;
+        const vb = vc.iov_base orelse continue;
+        while (true) {
+            var node = task.WaitQueue.Node{.data = t};
+            const pw = fs.PollWait{.events = fs.PollIn, .wqn = &node};
+            const pr = sk.ops.poll(sk, pw) catch |e| {
+                if (ret > 0) return ret;
+                return -@as(i64, @intFromError(e));
+            };
+            defer pr.release(pr);
+            if (pr.events == 0) break :outer;
+            const r = (sk.ops.recv_from(sk, vb[off..vc.iov_len], m.addr) catch |e| { 
+                if (ret > 0) return ret;
+                return -@as(i64, @intFromError(e));
+            }).len;
+            off += r;
+            ret += @intCast(r);
+            if (off >= vc.iov_len) {
+                break;
+            }
+
+        }
+    }
+    return @intCast(ret);
+}
+

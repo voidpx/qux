@@ -83,7 +83,7 @@ fn read(lba:u64, sector_count:u16, buffer:[]u16) io.IOError!void {
     try readNoCheck(lba, sector_count, buffer);
 }
 
-fn write(lba: u64, sector_count: u16, buffer: []u16) !void {
+fn write(lba: u64, sector_count: u16, buffer: []align(1) u16) !void {
     std.debug.assert((sector_count << 8) == buffer.len); // 512 bytes per sector
 
     // Select master drive with LBA bit set
@@ -224,7 +224,7 @@ fn writeBlks(bdev:*blk.BlockDevice, start:usize, buf:[]const u8) io.IOError!void
     if (off + blk_cnt > bdev.capacity) {
         return io.IOError.ReadError;
     }
-    const buf2:[*]u16 align(1) = @alignCast(@ptrCast(@constCast(buf.ptr)));
+    const buf2:[*] align(1) u16 = @alignCast(@ptrCast(@constCast(buf.ptr)));
     //XXX: handle blk_cnt >= 2^16 
     try write(off, @truncate(blk_cnt), buf2[0..buf.len/2]);
 }

@@ -59,7 +59,7 @@ const udp_sk_ops:net.SockOps = .{
     .poll = &net.sockPoll,
 };
 
-const proto_udp:net.ProtoFamily = .{.new_sock = undefined};
+const proto_udp:net.ProtoFamily = .{.new_sock = &newUdpSk};
 
 
 fn newUdpSk(_:u32) !*net.Sock {
@@ -69,11 +69,15 @@ fn newUdpSk(_:u32) !*net.Sock {
     return sk;
 }
 
+const syscall = @import("../syscall.zig");
 fn udpReceiveFrom(sk:*net.Sock, buf: []u8, addr:?*net.SockAddr) ![]u8 {
     const l = lock.cli();
     defer lock.sti(l);
     while (true) {
         const p = sk.rq.peek() orelse {
+            if (sk.opts & fs.NON_BLOCK > 0) return @errorFromInt(syscall.EAGAIN);
+            const t = task.getCurrentTask();
+            if (t.signal.signalPending()) return @errorFromInt(syscall.EINTR);
             task.wait(&sk.rwq);
             continue;
         };
@@ -87,9 +91,9 @@ fn udpReceiveFrom(sk:*net.Sock, buf: []u8, addr:?*net.SockAddr) ![]u8 {
         if (addr) |a| {
             const iph = p.getIpV4Hdr();
             const uph:*UdpHdr = @ptrCast(tdata.ptr);
-            a.family = 0;
-            a.addr = iph.getSrcAddr();
-            a.port = uph.getSrcPort();
+            a.family = 2;
+            a.addr = iph.src_addr;
+            a.port = uph.sport;
             @memset(&a.pad, 0);
         }
         if (sk.rq.read_pos >= data.len) {
@@ -104,10 +108,28 @@ fn udpReceive(sk:*net.Sock, buf: []u8) ![]u8 {
     return try udpReceiveFrom(sk, buf, null);
 }
 
+fn getFreePort() !u16 {
+    var p:u16 = 0xffff;
+    while (p >= 1024): (p -= 1) {
+        var it = sock_map.keyIterator();
+        while (it.next()) |a| {
+            if (p == a.port) continue; 
+        }
+        return p;
+    }
+    return error.NoFreeUdpPort;
+
+}
+
 fn ensureBind(sk:*net.Sock) !void {
-    if (sk.src_addr) |_| return;
+    var port:u16 = 0;
+    if (sk.src_addr) |a| {
+        port = a.port;
+    }
+    if (port != 0) return; // already bound
+    port = @byteSwap(try getFreePort());
     try udpBind(sk, &.{
-        .port = 1024,
+        .port = port,
     });
 }
 
@@ -166,7 +188,7 @@ fn udpConnect(sk:*net.Sock, addr:*const net.SockAddr) !void {
     };
 }
 
-fn udpReleaseSock(sk:*net.Sock) void {
+fn udpReleaseSock(sk:*net.Sock) !void {
     if (sk.src_addr) |a| {
         _ = sock_map.remove(a);
     }

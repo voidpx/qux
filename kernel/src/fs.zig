@@ -11,6 +11,9 @@ const object = @import("object.zig");
 const io = @import("io.zig");
 const task = @import("task.zig");
 
+pub const CLOSE_ON_EXEC:u32 = 0o2000000; 
+pub const NON_BLOCK:u32 = 0o4000; 
+
 pub const DEntry = extern struct {
     d_ino:u64 align(1) = 0,
     d_off:i64 align(1) = 0,
@@ -530,7 +533,7 @@ pub export fn sysIoCtl(fd:u32, cmd:u32, arg:u64) callconv(std.builtin.CallingCon
     return op(f, cmd, arg);
 }
 
-const IoVec = extern struct {
+pub const IoVec = extern struct {
     iov_base:?[*]u8 align(1),
     iov_len:usize align(1)
 };

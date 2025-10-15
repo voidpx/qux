@@ -63,7 +63,7 @@ fn getFreePort() !u16 {
 
         return p;
     }
-    return error.AddressInUse;
+    return error.NoFreeTcpPort;
 }
 
 fn tcpBind(sk:*net.Sock, addr:*const net.SockAddr) !void {
@@ -191,6 +191,7 @@ fn tcpReceiveFrom(sk:*net.Sock, buf:[]u8, _:?*net.SockAddr) anyerror![]u8 {
     return try tcpReceive(sk, buf);
 }
 
+const syscall = @import("../syscall.zig");
 fn tcpReceive(sk:*net.Sock, buf:[]u8) anyerror![]u8 {
     const tsk = toTcpSock(sk);
     const l = lock.cli();
@@ -198,7 +199,8 @@ fn tcpReceive(sk:*net.Sock, buf:[]u8) anyerror![]u8 {
     while (true) {
         try checkConnected(tsk);
         const p = sk.rq.peek() orelse {
-            if (task.getCurrentTask().signal.signalPending()) return error.InterruptedError;
+            if (sk.opts & fs.NON_BLOCK > 0) return @errorFromInt(syscall.EAGAIN);
+            if (task.getCurrentTask().signal.signalPending()) return @errorFromInt(syscall.EAGAIN);
             task.wait(&sk.rwq);
             continue;
         };
@@ -574,7 +576,7 @@ fn sendACK(sk:?*TcpSock, pkt:?*net.Packet, fin:bool) !void {
         if (sk) |s| {
             th.setSeq(s.seq);
             if (s.ack < ti.getSeq()) {
-                console.print("tcp packet received out of order\n", .{});
+                //console.print("tcp packet received out of order\n", .{});
                 return;
             } else if (s.ack == ti.getSeq()) {
                 s.ack = ack;
